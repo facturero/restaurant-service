@@ -1,0 +1,1031 @@
+openapi: 3.0.3
+
+info:
+  title: restaurant-service API
+  version: 1.0.0
+  description: >
+    Plugin de restaurantes — entregable 1: mapa del local. Plantas, zonas, mesas
+    (con posición y forma opcionales), un plano guardado como JSON versionado y
+    los horarios de atención con turnos y excepciones.
+
+
+    Las rutas se sirven CON el prefijo `/restaurant` (el gateway reenvía
+    `ANY /restaurant/*` sin quitarlo). `/health` va sin prefijo ni autenticación.
+
+
+    No verifica JWT: confía en las cabeceras del gateway (X-Organization-Id,
+    X-User-Id, X-Country-Code, X-Permissions). Todo recurso de otra organización
+    responde 404, nunca 403: no se filtra la existencia.
+
+
+    MÓDULO DE PAGO: el gateway exige el plugin `restaurant.floorplan`
+    (`requiresPlugin`) antes de reenviar nada; sin él la respuesta es
+    `403 PLUGIN_NOT_ACTIVE` y no llega a este servicio.
+
+
+    MESAS NUNCA SE BORRAN: desactivar libera el nombre (y el índice único cubre
+    solo mesas activas) pero conserva la fila y su id, porque el entregable 2 ata
+    las reservas a esos ids. Tampoco hay DELETE de plantas ni de zonas.
+
+
+    Fuera de alcance de este entregable: reservas, página pública, correos y
+    garantía con tarjeta. El servicio NO consume eventos todavía.
+
+servers:
+  - url: http://localhost:3015
+    description: Desarrollo local
+  - url: http://restaurant-service-node:3015
+    description: Dentro del clúster
+
+tags:
+  - name: health
+  - name: establishments
+  - name: floors
+  - name: tables
+  - name: zones
+  - name: schedule
+
+paths:
+
+  /health:
+    get:
+      tags: [health]
+      summary: Healthcheck (sin autenticación)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+
+  # -------------------------------------------------------------------------
+  # Inicialización
+  # -------------------------------------------------------------------------
+  /restaurant/establishments/{establishmentId}/setup:
+    post:
+      tags: [establishments]
+      summary: Inicializar el establecimiento (idempotente)
+      description: >
+        Deja una planta «Salón principal» y un horario por defecto la primera vez.
+        Llamarlo de nuevo no duplica nada: devuelve lo existente. Se llama al abrir
+        las pantallas del plugin.
+      x-required-permission: restaurant:manage
+      parameters:
+        - $ref: '#/components/parameters/OrgHeader'
+        - $ref: '#/components/parameters/EstablishmentId'
+      responses:
+        '200':
+          description: Planta y horario del establecimiento
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SetupResult' }
+        '401': { $ref: '#/components/responses/OrgContextRequired' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/EstablishmentNotFound' }
+
+  # -------------------------------------------------------------------------
+  # Plantas
+  # -------------------------------------------------------------------------
+  /restaurant/establishments/{establishmentId}/floors:
+    get:
+      tags: [floors]
+      summary: Listar las plantas del establecimiento
+      x-required-permission: restaurant:read
+      parameters:
+        - $ref: '#/components/parameters/OrgHeader'
+        - $ref: '#/components/parameters/EstablishmentId'
+      responses:
+        '200':
+          description: Plantas ordenadas por `sortOrder`
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Floor' }
+        '401': { $ref: '#/components/responses/OrgContextRequired' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /restaurant/floors/{floorId}/plan:
+    get:
+      tags: [floors]
+      summary: Abrir el plano completo (planta + zonas + mesas + dibujo)
+      description: >
+        Todo lo que el editor necesita para pintar el local, en una sola petición.
+        El borrador se guarda en el navegador (localStorage); el servidor solo
+        conoce la última versión publicada.
+      x-required-permission: restaurant:read
+      parameters:
+        - $ref: '#/components/parameters/OrgHeader'
+        - $ref: '#/components/parameters/FloorId'
+      responses:
+        '200':
+          description: El plano
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FloorPlan' }
+        '401': { $ref: '#/components/responses/OrgContextRequired' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/FloorNotFound' }
+
+    put:
+      tags: [floors]
+      summary: Guardar el plano completo
+      description: >
+        Aplica en UNA sola transacción: o queda todo o no queda nada. Las mesas y
+        zonas que ya no vienen se desactivan (jamás se borran). El control de
+        versión va antes de escribir: si `expectedVersion` no es la actual, otra
+        persona guardó y se responde 409 con `currentVersion`.
+      x-required-permission: restaurant:manage
+      parameters:
+        - $ref: '#/components/parameters/OrgHeader'
+        - $ref: '#/components/parameters/FloorId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SaveFloorPlanRequest' }
+      responses:
+        '200':
+          description: Planta guardada (con la nueva `layoutVersion`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Floor' }
+        '401': { $ref: '#/components/responses/OrgContextRequired' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/FloorNotFound' }
+        '409':
+          description: Otra persona guardó antes (`PLAN_VERSION_CONFLICT`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example:
+                code: PLAN_VERSION_CONFLICT
+                message: Otra persona modificó el plano.
+                details:
+                  - { field: expectedVersion, message: 'La versión del plano ha cambiado (ahora es la 3).' }
+                  - { field: currentVersion, message: '3' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /restaurant/floors/{floorId}:
+    patch:
+      tags: [floors]
+      summary: Actualizar una planta (nombre, medidas, orden o estado)
+      description: >
+        Renombrar a un nombre ya usado en el establecimiento responde 409, aunque
+        sea con otro idioma de colación: el índice es único por establecimiento.
+      x-required-permission: restaurant:manage
+      parameters:
+        - $ref: '#/components/parameters/OrgHeader'
+        - $ref: '#/components/parameters/FloorId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateFloorRequest' }
+      responses:
+        '200':
+          description: Planta actualizada
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Floor' }
+        '401': { $ref: '#/components/responses/OrgContextRequired' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/FloorNotFound' }
+        '409':
+          description: Ya existe una planta con ese nombre (`FLOOR_NAME_EXISTS`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { code: FLOOR_NAME_EXISTS, message: Ya existe una planta con ese nombre en el establecimiento. }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  # -------------------------------------------------------------------------
+  # Mesas
+  # -------------------------------------------------------------------------
+  /restaurant/establishments/{establishmentId}/tables:
+    get:
+      tags: [tables]
+      summary: Listar mesas del establecimiento, con filtros
+      x-required-permission: restaurant:read
+      parameters:
+        - $ref: '#/components/parameters/OrgHeader'
+        - $ref: '#/components/parameters/EstablishmentId'
+        - name: floorId
+          in: query
+          schema: { type: string, format: uuid }
+        - name: zoneId
+          in: query
+          schema: { type: string, format: uuid }
+        - name: status
+          in: query
+          schema: { type: string, enum: [active, inactive] }
+      responses:
+        '200':
+          description: Mesas
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Table' }
+        '401': { $ref: '#/components/responses/OrgContextRequired' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /restaurant/floors/{floorId}/tables:
+    post:
+      tags: [tables]
+      summary: Crear una mesa
+      x-required-permission: restaurant:manage
+      parameters:
+        - $ref: '#/components/parameters/OrgHeader'
+        - $ref: '#/components/parameters/FloorId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTableRequest' }
+      responses:
+        '201':
+          description: Mesa creada
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Table' }
+        '401': { $ref: '#/components/responses/OrgContextRequired' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Planta o zona inexistente (la zona debe ser de la misma planta)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { code: ZONE_NOT_FOUND, message: Zona no encontrada. }
+        '409':
+          description: Ya existe una mesa activa con ese nombre en la planta
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { code: TABLE_NAME_EXISTS, message: Ya existe una mesa activa con ese nombre en la planta. }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /restaurant/floors/{floorId}/tables/bulk:
+    post:
+      tags: [tables]
+      summary: «¿Cuántas mesas tienes?» — crear N de golpe
+      description: >
+        Nombra las nuevas `Mesa 1…N` continuando desde la última existente, para que
+        añadir mesas a un local que ya tenía no repita nombres ni reinicie la
+        numeración. La ruta fija se declara antes que la de parámetro.
+      x-required-permission: restaurant:manage
+      parameters:
+        - $ref: '#/components/parameters/OrgHeader'
+        - $ref: '#/components/parameters/FloorId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BulkCreateTablesRequest' }
+      responses:
+        '201':
+          description: Mesas creadas
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Table' }
+        '401': { $ref: '#/components/responses/OrgContextRequired' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/FloorNotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /restaurant/tables/{id}:
+    patch:
+      tags: [tables]
+      summary: Actualizar una mesa (también desactivarla)
+      description: >
+        `status: inactive` desactiva la mesa y libera su nombre. No existe DELETE:
+        la fila y su id se conservan para las reservas del entregable 2.
+      x-required-permission: restaurant:manage
+      parameters:
+        - $ref: '#/components/parameters/OrgHeader'
+        - $ref: '#/components/parameters/Id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateTableRequest' }
+      responses:
+        '200':
+          description: Mesa actualizada
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Table' }
+        '401': { $ref: '#/components/responses/OrgContextRequired' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/TableNotFound' }
+        '409':
+          description: Nombre ya usado por otra mesa activa (`TABLE_NAME_EXISTS`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  # -------------------------------------------------------------------------
+  # Zonas
+  # -------------------------------------------------------------------------
+  /restaurant/floors/{floorId}/zones:
+    get:
+      tags: [zones]
+      summary: Listar las zonas de una planta
+      x-required-permission: restaurant:read
+      parameters:
+        - $ref: '#/components/parameters/OrgHeader'
+        - $ref: '#/components/parameters/FloorId'
+      responses:
+        '200':
+          description: Zonas
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Zone' }
+        '401': { $ref: '#/components/responses/OrgContextRequired' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+    post:
+      tags: [zones]
+      summary: Crear una zona
+      x-required-permission: restaurant:manage
+      parameters:
+        - $ref: '#/components/parameters/OrgHeader'
+        - $ref: '#/components/parameters/FloorId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateZoneRequest' }
+      responses:
+        '201':
+          description: Zona creada
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Zone' }
+        '401': { $ref: '#/components/responses/OrgContextRequired' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/FloorNotFound' }
+        '409':
+          description: Ya existe una zona con ese nombre en la planta
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { code: ZONE_NAME_EXISTS, message: Ya existe una zona con ese nombre en la planta. }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /restaurant/zones/{id}:
+    patch:
+      tags: [zones]
+      summary: Actualizar una zona
+      description: >
+        El índice de zonas es único por planta SIN condición de estado, así que una
+        zona desactivada conserva su nombre: renombrar es actualizar la misma fila.
+      x-required-permission: restaurant:manage
+      parameters:
+        - $ref: '#/components/parameters/OrgHeader'
+        - $ref: '#/components/parameters/Id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateZoneRequest' }
+      responses:
+        '200':
+          description: Zona actualizada
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Zone' }
+        '401': { $ref: '#/components/responses/OrgContextRequired' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/ZoneNotFound' }
+        '409':
+          description: Nombre de zona ya usado (`ZONE_NAME_EXISTS`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  # -------------------------------------------------------------------------
+  # Horarios
+  # -------------------------------------------------------------------------
+  /restaurant/establishments/{establishmentId}/schedule:
+    get:
+      tags: [schedule]
+      summary: Leer los ajustes, turnos y excepciones del horario
+      x-required-permission: restaurant:read
+      parameters:
+        - $ref: '#/components/parameters/OrgHeader'
+        - $ref: '#/components/parameters/EstablishmentId'
+      responses:
+        '200':
+          description: Horario del establecimiento
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ScheduleView' }
+        '401': { $ref: '#/components/responses/OrgContextRequired' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: El establecimiento aún no está inicializado (`SCHEDULE_NOT_FOUND`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { code: SCHEDULE_NOT_FOUND, message: Horario no encontrado. Inicializa el establecimiento primero. }
+
+    put:
+      tags: [schedule]
+      summary: Guardar ajustes y reemplazar todos los turnos
+      description: >
+        Reemplaza ajustes y turnos de una vez: un horario a medias (turnos nuevos
+        con ajustes viejos) sería peor que no guardar. Valida ambos juntos y
+        devuelve todos los problemas.
+      x-required-permission: restaurant:manage
+      parameters:
+        - $ref: '#/components/parameters/OrgHeader'
+        - $ref: '#/components/parameters/EstablishmentId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SaveScheduleRequest' }
+      responses:
+        '200':
+          description: Horario guardado
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  schedule: { $ref: '#/components/schemas/EstablishmentSchedule' }
+                  shifts:
+                    type: array
+                    items: { $ref: '#/components/schemas/Shift' }
+        '401': { $ref: '#/components/responses/OrgContextRequired' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Horario no inicializado (`SCHEDULE_NOT_FOUND`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: Horario inválido (`INVALID_SCHEDULE` o `VALIDATION_ERROR`) con todos los problemas juntos
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /restaurant/establishments/{establishmentId}/schedule/preview:
+    get:
+      tags: [schedule]
+      summary: Vista previa de turnos que vería un cliente una fecha
+      description: >
+        Prueba de que el horario quedó bien configurado. Es la base del entregable 2.
+        Regla del producto: el último turno empieza como muy tarde `slotMinutes`
+        antes del cierre (12:00-15:00 con huecos de 30 ⇒ 12:00 … 14:30).
+      x-required-permission: restaurant:read
+      parameters:
+        - $ref: '#/components/parameters/OrgHeader'
+        - $ref: '#/components/parameters/EstablishmentId'
+        - name: date
+          in: query
+          required: true
+          schema: { type: string, format: date }
+          description: Fecha LOCAL del establecimiento (YYYY-MM-DD).
+      responses:
+        '200':
+          description: Inicios de turno de esa fecha
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SlotsPreview' }
+        '401': { $ref: '#/components/responses/OrgContextRequired' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Horario no inicializado (`SCHEDULE_NOT_FOUND`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: Falta el parámetro `date` o no tiene formato YYYY-MM-DD
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /restaurant/establishments/{establishmentId}/schedule/exceptions:
+    post:
+      tags: [schedule]
+      summary: Añadir una excepción (cierre o horario especial) a una fecha
+      x-required-permission: restaurant:manage
+      parameters:
+        - $ref: '#/components/parameters/OrgHeader'
+        - $ref: '#/components/parameters/EstablishmentId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddScheduleExceptionRequest' }
+      responses:
+        '201':
+          description: Excepción creada
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ScheduleException' }
+        '401': { $ref: '#/components/responses/OrgContextRequired' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Horario no inicializado (`SCHEDULE_NOT_FOUND`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: Ya hay una excepción para esa fecha (`SCHEDULE_EXCEPTION_EXISTS`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /restaurant/schedule/exceptions/{id}:
+    delete:
+      tags: [schedule]
+      summary: Borrar una excepción
+      description: >
+        La ruta no lleva el establecimiento en el path, así que el servicio resuelve
+        el horario por la excepción para publicar el evento con `establishmentId`.
+      x-required-permission: restaurant:manage
+      parameters:
+        - $ref: '#/components/parameters/OrgHeader'
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '204':
+          description: Borrada (sin cuerpo)
+        '401': { $ref: '#/components/responses/OrgContextRequired' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Excepción inexistente o de otra organización (`SCHEDULE_EXCEPTION_NOT_FOUND`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { code: SCHEDULE_EXCEPTION_NOT_FOUND, message: Excepción de horario no encontrada. }
+
+components:
+
+  parameters:
+    OrgHeader:
+      name: X-Organization-Id
+      in: header
+      required: true
+      schema: { type: string, format: uuid }
+    EstablishmentId:
+      name: establishmentId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    FloorId:
+      name: floorId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  schemas:
+
+    EntityStatus:
+      type: string
+      enum: [active, inactive]
+
+    TableShape:
+      type: string
+      enum: [rect, round]
+
+    Rotation:
+      type: integer
+      enum: [0, 90, 180, 270]
+
+    ZoneColor:
+      type: string
+      description: Token del tema, nunca hexadecimal. El front pinta `rgb(var(--v-theme-<token>))`.
+      enum: [primary, secondary, success, info, warning, error]
+
+    ObjectKind:
+      type: string
+      enum: [bar, column, restroom, kitchen, plant, stairs, entrance]
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string, example: VALIDATION_ERROR }
+        message: { type: string }
+        details:
+          type: array
+          items:
+            type: object
+            properties:
+              field: { type: string }
+              message: { type: string }
+
+    Floor:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        organizationId: { type: string, format: uuid }
+        establishmentId: { type: string, format: uuid }
+        name: { type: string, example: Salón principal, maxLength: 80 }
+        widthCm:
+          type: integer
+          nullable: true
+          minimum: 300
+          maximum: 100000
+          description: Ancho del local en centímetros (3 m … 1000 m).
+        heightCm: { type: integer, nullable: true, minimum: 300, maximum: 100000 }
+        sortOrder: { type: integer, minimum: 0 }
+        status: { $ref: '#/components/schemas/EntityStatus' }
+        layoutVersion:
+          type: integer
+          minimum: 0
+          description: Sube de uno en uno con cada guardado del plano (bloqueo optimista).
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    Zone:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        organizationId: { type: string, format: uuid }
+        floorId: { type: string, format: uuid }
+        name: { type: string, maxLength: 60 }
+        color: { $ref: '#/components/schemas/ZoneColor' }
+        status: { $ref: '#/components/schemas/EntityStatus' }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    Table:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        organizationId: { type: string, format: uuid }
+        floorId: { type: string, format: uuid }
+        zoneId: { type: string, format: uuid, nullable: true }
+        name: { type: string, maxLength: 60, description: Único entre las mesas ACTIVAS de la planta. }
+        capacityMin: { type: integer, minimum: 1, maximum: 50 }
+        capacityMax: { type: integer, minimum: 1, maximum: 50 }
+        xCm: { type: integer, nullable: true, description: Posición en el plano; `null` = sin ubicar. }
+        yCm: { type: integer, nullable: true }
+        widthCm: { type: integer, minimum: 30, maximum: 600 }
+        heightCm: { type: integer, minimum: 30, maximum: 600, description: En mesas redondas es igual a `widthCm` (diámetro). }
+        shape: { $ref: '#/components/schemas/TableShape' }
+        rotationDeg: { $ref: '#/components/schemas/Rotation' }
+        status: { $ref: '#/components/schemas/EntityStatus' }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    PlanElement:
+      description: >
+        Pared, puerta u objeto decorativo. Discriminado por `type`. Coordenadas en
+        centímetros enteros (0 … 100000). Se guarda en `floors.layout_elements`.
+      oneOf:
+        - type: object
+          required: [id, type, x1, y1, x2, y2]
+          properties:
+            id: { type: string }
+            type: { type: string, enum: [wall] }
+            x1: { type: integer }
+            y1: { type: integer }
+            x2: { type: integer }
+            y2: { type: integer }
+            thicknessCm: { type: integer, default: 10, minimum: 1, maximum: 100 }
+        - type: object
+          required: [id, type, x, y, widthCm, rotationDeg]
+          properties:
+            id: { type: string }
+            type: { type: string, enum: [door] }
+            x: { type: integer }
+            y: { type: integer }
+            widthCm: { type: integer, minimum: 20, maximum: 2000 }
+            rotationDeg: { $ref: '#/components/schemas/Rotation' }
+        - type: object
+          required: [id, type, kind, x, y, widthCm, heightCm, rotationDeg]
+          properties:
+            id: { type: string }
+            type: { type: string, enum: [object] }
+            kind: { $ref: '#/components/schemas/ObjectKind' }
+            x: { type: integer }
+            y: { type: integer }
+            widthCm: { type: integer, minimum: 10 }
+            heightCm: { type: integer, minimum: 10 }
+            rotationDeg: { $ref: '#/components/schemas/Rotation' }
+            label: { type: string, maxLength: 60 }
+
+    FloorPlan:
+      type: object
+      properties:
+        floor: { $ref: '#/components/schemas/Floor' }
+        zones:
+          type: array
+          items: { $ref: '#/components/schemas/Zone' }
+        tables:
+          type: array
+          items: { $ref: '#/components/schemas/Table' }
+        layout:
+          type: object
+          properties:
+            version: { type: integer, minimum: 0 }
+            elements:
+              type: array
+              items: { $ref: '#/components/schemas/PlanElement' }
+
+    EstablishmentSchedule:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        organizationId: { type: string, format: uuid }
+        establishmentId: { type: string, format: uuid }
+        timezone: { type: string, example: America/Guayaquil }
+        slotMinutes:
+          type: integer
+          enum: [5, 10, 15, 20, 30, 60]
+          description: Cada cuántos minutos se ofrece un turno.
+        cleanupMinutes: { type: integer, minimum: 0, maximum: 120 }
+        durationByPartySize:
+          type: array
+          description: >
+            Duración de una comida por tamaño de grupo. La última fila tiene
+            `upTo: null` («y todos los mayores»).
+          items:
+            type: object
+            required: [upTo, minutes]
+            properties:
+              upTo: { type: integer, nullable: true, minimum: 1 }
+              minutes: { type: integer, minimum: 15, maximum: 480 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    Shift:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        weekday: { type: integer, minimum: 0, maximum: 6, description: 0 = domingo … 6 = sábado. }
+        opensAt: { type: string, pattern: '^([01]\\d|2[0-3]):[0-5]\\d$', example: '12:00' }
+        closesAt: { type: string, pattern: '^([01]\\d|2[0-3]):[0-5]\\d$', example: '15:00' }
+        label: { type: string, nullable: true, example: Almuerzo }
+
+    ScheduleException:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        onDate: { type: string, format: date, example: '2026-12-25' }
+        kind: { type: string, enum: [closed, special_hours] }
+        opensAt: { type: string, nullable: true, description: Solo en `special_hours`. }
+        closesAt: { type: string, nullable: true }
+        reason: { type: string, nullable: true, maxLength: 120 }
+        createdAt: { type: string, format: date-time }
+
+    ScheduleView:
+      type: object
+      properties:
+        schedule: { $ref: '#/components/schemas/EstablishmentSchedule' }
+        shifts:
+          type: array
+          items: { $ref: '#/components/schemas/Shift' }
+        exceptions:
+          type: array
+          items: { $ref: '#/components/schemas/ScheduleException' }
+
+    SlotsPreview:
+      type: object
+      properties:
+        date: { type: string, format: date }
+        timezone: { type: string }
+        slots:
+          type: array
+          items:
+            type: object
+            properties:
+              startsAt: { type: string, example: '12:30' }
+              shiftLabel: { type: string, nullable: true }
+
+    SetupResult:
+      type: object
+      properties:
+        floor: { $ref: '#/components/schemas/Floor' }
+        schedule: { $ref: '#/components/schemas/EstablishmentSchedule' }
+
+    UpdateFloorRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 80 }
+        widthCm: { type: integer, nullable: true, minimum: 300, maximum: 100000 }
+        heightCm: { type: integer, nullable: true, minimum: 300, maximum: 100000 }
+        sortOrder: { type: integer, minimum: 0 }
+        status: { $ref: '#/components/schemas/EntityStatus' }
+
+    CreateZoneRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 60 }
+        color: { $ref: '#/components/schemas/ZoneColor' }
+
+    UpdateZoneRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 60 }
+        color: { $ref: '#/components/schemas/ZoneColor' }
+        status: { $ref: '#/components/schemas/EntityStatus' }
+
+    CreateTableRequest:
+      type: object
+      additionalProperties: false
+      required: [name, capacityMin, capacityMax]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 60 }
+        capacityMin: { type: integer, minimum: 1, maximum: 50 }
+        capacityMax: { type: integer, minimum: 1, maximum: 50 }
+        zoneId: { type: string, format: uuid, nullable: true }
+        xCm: { type: integer, nullable: true }
+        yCm: { type: integer, nullable: true }
+        widthCm: { type: integer, minimum: 30, maximum: 600 }
+        heightCm: { type: integer, minimum: 30, maximum: 600 }
+        shape: { $ref: '#/components/schemas/TableShape' }
+        rotationDeg: { $ref: '#/components/schemas/Rotation' }
+
+    UpdateTableRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 60 }
+        capacityMin: { type: integer, minimum: 1, maximum: 50 }
+        capacityMax: { type: integer, minimum: 1, maximum: 50 }
+        zoneId: { type: string, format: uuid, nullable: true }
+        xCm: { type: integer, nullable: true }
+        yCm: { type: integer, nullable: true }
+        widthCm: { type: integer, minimum: 30, maximum: 600 }
+        heightCm: { type: integer, minimum: 30, maximum: 600 }
+        shape: { $ref: '#/components/schemas/TableShape' }
+        rotationDeg: { $ref: '#/components/schemas/Rotation' }
+        status: { $ref: '#/components/schemas/EntityStatus' }
+
+    BulkCreateTablesRequest:
+      type: object
+      additionalProperties: false
+      required: [count, capacityMin, capacityMax]
+      properties:
+        count: { type: integer, minimum: 1, maximum: 100 }
+        capacityMin: { type: integer, minimum: 1, maximum: 50 }
+        capacityMax: { type: integer, minimum: 1, maximum: 50 }
+        prefix: { type: string, minLength: 1, maxLength: 30, default: Mesa }
+
+    PlanZonePayload:
+      type: object
+      additionalProperties: false
+      required: [id, name]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, minLength: 1, maxLength: 60 }
+        color: { $ref: '#/components/schemas/ZoneColor' }
+
+    PlanTablePayload:
+      type: object
+      additionalProperties: false
+      required: [id, name, capacityMin, capacityMax]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, minLength: 1, maxLength: 60 }
+        capacityMin: { type: integer, minimum: 1, maximum: 50 }
+        capacityMax: { type: integer, minimum: 1, maximum: 50 }
+        zoneId: { type: string, format: uuid, nullable: true }
+        xCm: { type: integer, nullable: true }
+        yCm: { type: integer, nullable: true }
+        widthCm: { type: integer, minimum: 30, maximum: 600 }
+        heightCm: { type: integer, minimum: 30, maximum: 600 }
+        shape: { $ref: '#/components/schemas/TableShape' }
+        rotationDeg: { $ref: '#/components/schemas/Rotation' }
+
+    SaveFloorPlanRequest:
+      type: object
+      additionalProperties: false
+      required: [expectedVersion, floor, zones, tables, elements]
+      properties:
+        expectedVersion:
+          type: integer
+          minimum: 0
+          description: La `layoutVersion` que el editor tenía al abrir; si no coincide, 409.
+        floor:
+          type: object
+          additionalProperties: false
+          properties:
+            widthCm: { type: integer, nullable: true, minimum: 300, maximum: 100000 }
+            heightCm: { type: integer, nullable: true, minimum: 300, maximum: 100000 }
+        zones:
+          type: array
+          maxItems: 200
+          items: { $ref: '#/components/schemas/PlanZonePayload' }
+        tables:
+          type: array
+          maxItems: 500
+          items: { $ref: '#/components/schemas/PlanTablePayload' }
+        elements:
+          type: array
+          maxItems: 500
+          description: Máximo 256 KB serializados; se comprueba ANTES de validar la forma.
+          items: { $ref: '#/components/schemas/PlanElement' }
+
+    SaveScheduleRequest:
+      type: object
+      additionalProperties: false
+      required: [shifts]
+      properties:
+        timezone: { type: string, minLength: 1, maxLength: 64 }
+        slotMinutes: { type: integer, enum: [5, 10, 15, 20, 30, 60] }
+        cleanupMinutes: { type: integer, minimum: 0, maximum: 120 }
+        durationByPartySize:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [upTo, minutes]
+            properties:
+              upTo: { type: integer, nullable: true, minimum: 1 }
+              minutes: { type: integer, minimum: 15, maximum: 480 }
+        shifts:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [weekday, opensAt, closesAt]
+            properties:
+              weekday: { type: integer, minimum: 0, maximum: 6 }
+              opensAt: { type: string, pattern: '^([01]\\d|2[0-3]):[0-5]\\d$' }
+              closesAt: { type: string, pattern: '^([01]\\d|2[0-3]):[0-5]\\d$' }
+              label: { type: string, maxLength: 40, nullable: true }
+
+    AddScheduleExceptionRequest:
+      type: object
+      additionalProperties: false
+      required: [onDate, kind]
+      properties:
+        onDate: { type: string, format: date }
+        kind: { type: string, enum: [closed, special_hours] }
+        opensAt: { type: string, nullable: true, description: Obligatorio cuando kind es special_hours. }
+        closesAt: { type: string, nullable: true }
+        reason: { type: string, maxLength: 120, nullable: true }
+
+  responses:
+    ValidationError:
+      description: 'Datos inválidos (`VALIDATION_ERROR` o `INVALID_PLAN`/`INVALID_SCHEDULE`)'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            code: VALIDATION_ERROR
+            message: La petición no es válida.
+            details:
+              - { field: capacityMax, message: 'La capacidad máxima no puede ser menor que la mínima.' }
+    OrgContextRequired:
+      description: Falta X-Organization-Id
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { code: ORG_CONTEXT_REQUIRED, message: Falta el contexto de organización. }
+    Forbidden:
+      description: Permiso insuficiente
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { code: FORBIDDEN, message: Permiso insuficiente. }
+    EstablishmentNotFound:
+      description: El establecimiento no existe o no es de la organización
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { code: ESTABLISHMENT_NOT_FOUND, message: Establecimiento no encontrado. }
+    FloorNotFound:
+      description: La planta no existe o es de otra organización
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { code: FLOOR_NOT_FOUND, message: Planta no encontrada. }
+    TableNotFound:
+      description: La mesa no existe o es de otra organización
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { code: TABLE_NOT_FOUND, message: Mesa no encontrada. }
+    ZoneNotFound:
+      description: La zona no existe, es de otra organización o no es de esta planta
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { code: ZONE_NOT_FOUND, message: Zona no encontrada. }

@@ -1,0 +1,304 @@
+asyncapi: 3.0.0
+
+info:
+  title: restaurant-service — Eventos
+  version: 1.0.0
+  description: >
+    Eventos de restaurant-service sobre RabbitMQ. Publica los cambios del mapa del
+    local (plantas, plano, mesas, zonas) y del horario. **NO consume eventos en el
+    entregable 1**: no hay consumidores ni `processed_events` en uso todavía.
+
+
+    Patrón Outbox + relay. Exchange topic `crm.events`. El `outbox-relay` pone
+    `eventId` en las cabeceras y `ActorContext` (actor, ip, requestId) en cada
+    mensaje; todo payload lleva `organizationId` porque la bitácora lo exige.
+
+
+    Enrutado del gateway: aquí los eventos NO pasan por el gateway ni por su
+    `requiresPlugin`. El corte por plugin es solo HTTP; por eso el servicio siempre
+    publica lo que ocurre.
+
+
+    `restaurant.schedule_exception.deleted` se publica desde la ruta
+    `DELETE /restaurant/schedule/exceptions/{id}`, que no trae el establecimiento en
+    el path: el servicio resuelve el horario por la excepción para rellenarlo.
+
+defaultContentType: application/json
+
+servers:
+  rabbitmq:
+    host: localhost:5672
+    protocol: amqp
+    bindings:
+      amqp:
+        vhost: /
+
+channels:
+
+  floorCreated:
+    address: restaurant.floor.created
+    description: Se creó una planta (el setup deja «Salón principal»).
+    servers: [{ $ref: '#/servers/rabbitmq' }]
+    bindings:
+      amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
+    messages:
+      floorCreated: { $ref: '#/components/messages/FloorCreated' }
+
+  floorUpdated:
+    address: restaurant.floor.updated
+    description: Se actualizó una planta (nombre, medidas, orden o estado).
+    servers: [{ $ref: '#/servers/rabbitmq' }]
+    bindings:
+      amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
+    messages:
+      floorUpdated: { $ref: '#/components/messages/FloorUpdated' }
+
+  floorPlanSaved:
+    address: restaurant.floor_plan.saved
+    description: >
+      Se publicó una nueva versión del plano. Un solo evento por guardado, con el
+      recuento de lo que contiene; el dibujo completo vive en la base, no en el
+      mensaje.
+    servers: [{ $ref: '#/servers/rabbitmq' }]
+    bindings:
+      amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
+    messages:
+      floorPlanSaved: { $ref: '#/components/messages/FloorPlanSaved' }
+
+  tableUpserted:
+    address: restaurant.table.upserted
+    description: >
+      Una mesa se creó, cambió o se desactivó. La desactivación también trae estado:
+      el consumidor se entera por `status`, no por un evento de borrado (las mesas
+      nunca se borran).
+    servers: [{ $ref: '#/servers/rabbitmq' }]
+    bindings:
+      amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
+    messages:
+      tableUpserted: { $ref: '#/components/messages/TableUpserted' }
+
+  zoneUpserted:
+    address: restaurant.zone.upserted
+    description: Una zona se creó, cambió o se desactivó.
+    servers: [{ $ref: '#/servers/rabbitmq' }]
+    bindings:
+      amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
+    messages:
+      zoneUpserted: { $ref: '#/components/messages/ZoneUpserted' }
+
+  scheduleUpdated:
+    address: restaurant.schedule.updated
+    description: >
+      Se guardaron los ajustes y/o los turnos del horario. `shiftCount` evita tener
+      que leer los turnos para saber si el horario quedó vacío. El setup publica
+      este evento con `shiftCount: 0` al crear el horario por defecto.
+    servers: [{ $ref: '#/servers/rabbitmq' }]
+    bindings:
+      amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
+    messages:
+      scheduleUpdated: { $ref: '#/components/messages/ScheduleUpdated' }
+
+  scheduleExceptionCreated:
+    address: restaurant.schedule_exception.created
+    description: Se añadió un cierre o un horario especial a una fecha.
+    servers: [{ $ref: '#/servers/rabbitmq' }]
+    bindings:
+      amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
+    messages:
+      scheduleExceptionCreated: { $ref: '#/components/messages/ScheduleExceptionCreated' }
+
+  scheduleExceptionDeleted:
+    address: restaurant.schedule_exception.deleted
+    description: Se borró una excepción de horario.
+    servers: [{ $ref: '#/servers/rabbitmq' }]
+    bindings:
+      amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
+    messages:
+      scheduleExceptionDeleted: { $ref: '#/components/messages/ScheduleExceptionDeleted' }
+
+operations:
+
+  publishFloorCreated:
+    action: send
+    channel: { $ref: '#/channels/floorCreated' }
+
+  publishFloorUpdated:
+    action: send
+    channel: { $ref: '#/channels/floorUpdated' }
+
+  publishFloorPlanSaved:
+    action: send
+    channel: { $ref: '#/channels/floorPlanSaved' }
+
+  publishTableUpserted:
+    action: send
+    channel: { $ref: '#/channels/tableUpserted' }
+
+  publishZoneUpserted:
+    action: send
+    channel: { $ref: '#/channels/zoneUpserted' }
+
+  publishScheduleUpdated:
+    action: send
+    channel: { $ref: '#/channels/scheduleUpdated' }
+
+  publishScheduleExceptionCreated:
+    action: send
+    channel: { $ref: '#/channels/scheduleExceptionCreated' }
+
+  publishScheduleExceptionDeleted:
+    action: send
+    channel: { $ref: '#/channels/scheduleExceptionDeleted' }
+
+components:
+
+  messageTraits:
+    eventEnvelope:
+      headers:
+        type: object
+        required: [eventId, type, occurredAt]
+        properties:
+          eventId: { type: string, format: uuid }
+          type: { type: string }
+          occurredAt: { type: string, format: date-time }
+          organizationId: { type: string, format: uuid, nullable: true }
+
+  messages:
+
+    FloorCreated:
+      name: restaurant.floor.created
+      title: Planta creada
+      contentType: application/json
+      traits: [{ $ref: '#/components/messageTraits/eventEnvelope' }]
+      payload: { $ref: '#/components/schemas/FloorPayload' }
+
+    FloorUpdated:
+      name: restaurant.floor.updated
+      title: Planta actualizada
+      contentType: application/json
+      traits: [{ $ref: '#/components/messageTraits/eventEnvelope' }]
+      payload: { $ref: '#/components/schemas/FloorUpdatedPayload' }
+
+    FloorPlanSaved:
+      name: restaurant.floor_plan.saved
+      title: Plano guardado
+      contentType: application/json
+      traits: [{ $ref: '#/components/messageTraits/eventEnvelope' }]
+      payload: { $ref: '#/components/schemas/FloorPlanSavedPayload' }
+
+    TableUpserted:
+      name: restaurant.table.upserted
+      title: Mesa creada, actualizada o desactivada
+      contentType: application/json
+      traits: [{ $ref: '#/components/messageTraits/eventEnvelope' }]
+      payload: { $ref: '#/components/schemas/TablePayload' }
+
+    ZoneUpserted:
+      name: restaurant.zone.upserted
+      title: Zona creada, actualizada o desactivada
+      contentType: application/json
+      traits: [{ $ref: '#/components/messageTraits/eventEnvelope' }]
+      payload: { $ref: '#/components/schemas/ZonePayload' }
+
+    ScheduleUpdated:
+      name: restaurant.schedule.updated
+      title: Horario actualizado
+      contentType: application/json
+      traits: [{ $ref: '#/components/messageTraits/eventEnvelope' }]
+      payload: { $ref: '#/components/schemas/SchedulePayload' }
+
+    ScheduleExceptionCreated:
+      name: restaurant.schedule_exception.created
+      title: Excepción de horario creada
+      contentType: application/json
+      traits: [{ $ref: '#/components/messageTraits/eventEnvelope' }]
+      payload: { $ref: '#/components/schemas/ScheduleExceptionPayload' }
+
+    ScheduleExceptionDeleted:
+      name: restaurant.schedule_exception.deleted
+      title: Excepción de horario borrada
+      contentType: application/json
+      traits: [{ $ref: '#/components/messageTraits/eventEnvelope' }]
+      payload: { $ref: '#/components/schemas/ScheduleExceptionPayload' }
+
+  schemas:
+
+    FloorPayload:
+      type: object
+      required: [floorId, establishmentId, name, status, organizationId]
+      properties:
+        floorId: { type: string, format: uuid }
+        establishmentId: { type: string, format: uuid }
+        name: { type: string }
+        status: { type: string, enum: [active, inactive] }
+        organizationId: { type: string, format: uuid }
+
+    FloorUpdatedPayload:
+      allOf:
+        - $ref: '#/components/schemas/FloorPayload'
+        - type: object
+          required: [previous]
+          properties:
+            previous:
+              type: object
+              description: Estado anterior, para que la bitácora muestre el cambio.
+              properties:
+                name: { type: string }
+                status: { type: string, enum: [active, inactive] }
+
+    FloorPlanSavedPayload:
+      type: object
+      required: [floorId, establishmentId, version, tableCount, wallCount, elementCount, organizationId]
+      properties:
+        floorId: { type: string, format: uuid }
+        establishmentId: { type: string, format: uuid }
+        version: { type: integer, description: Nueva `layoutVersion` de la planta. }
+        tableCount: { type: integer, description: Mesas que quedaron activas en el plano. }
+        wallCount: { type: integer }
+        elementCount: { type: integer }
+        organizationId: { type: string, format: uuid }
+
+    TablePayload:
+      type: object
+      required: [tableId, floorId, establishmentId, name, capacityMin, capacityMax, status, organizationId]
+      properties:
+        tableId: { type: string, format: uuid }
+        floorId: { type: string, format: uuid }
+        establishmentId: { type: string, format: uuid }
+        name: { type: string }
+        capacityMin: { type: integer }
+        capacityMax: { type: integer }
+        zoneId: { type: string, format: uuid, nullable: true }
+        status: { type: string, enum: [active, inactive] }
+        organizationId: { type: string, format: uuid }
+
+    ZonePayload:
+      type: object
+      required: [zoneId, floorId, name, color, status, organizationId]
+      properties:
+        zoneId: { type: string, format: uuid }
+        floorId: { type: string, format: uuid }
+        name: { type: string }
+        color: { type: string, enum: [primary, secondary, success, info, warning, error] }
+        status: { type: string, enum: [active, inactive] }
+        organizationId: { type: string, format: uuid }
+
+    SchedulePayload:
+      type: object
+      required: [establishmentId, timezone, slotMinutes, shiftCount, organizationId]
+      properties:
+        establishmentId: { type: string, format: uuid }
+        timezone: { type: string }
+        slotMinutes: { type: integer }
+        shiftCount: { type: integer, description: Turnos que quedaron tras el guardado. }
+        organizationId: { type: string, format: uuid }
+
+    ScheduleExceptionPayload:
+      type: object
+      required: [establishmentId, exceptionId, onDate, kind, organizationId]
+      properties:
+        establishmentId: { type: string, format: uuid }
+        exceptionId: { type: string, format: uuid }
+        onDate: { type: string, format: date }
+        kind: { type: string, enum: [closed, special_hours] }
+        organizationId: { type: string, format: uuid }
