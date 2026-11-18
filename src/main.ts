@@ -20,6 +20,26 @@ import {
   SaveScheduleUseCase,
 } from './application/use-cases/schedule-use-cases.js';
 import { PreviewSlotsUseCase } from './application/use-cases/preview-slots.js';
+import { GetReservationSettingsUseCase, SaveReservationSettingsUseCase } from './application/use-cases/reservation-settings-use-cases.js';
+import {
+  GetPublicAvailabilityUseCase,
+  GetPublicRestaurantUseCase,
+  GetStaffAvailabilityUseCase,
+} from './application/use-cases/availability-use-cases.js';
+import {
+  CreatePublicReservationUseCase,
+  CreateStaffReservationUseCase,
+  ReservationBooker,
+} from './application/use-cases/create-reservation.js';
+import {
+  CancelReservationByTokenUseCase,
+  CancelReservationUseCase,
+  ChangeReservationStatusUseCase,
+  GetReservationByTokenUseCase,
+  GetReservationUseCase,
+  ListReservationsUseCase,
+} from './application/use-cases/reservation-management.js';
+import { HttpPluginGate } from './infrastructure/plugins/plugin-gate.js';
 import { createApp } from './interface/http/app.js';
 
 async function main(): Promise<void> {
@@ -32,6 +52,9 @@ async function main(): Promise<void> {
   const uowGateway = new SequelizeUnitOfWorkFactory((tx) => relay?.attachToTransaction(tx));
   const repos = readOnlyRepositories;
   const establishmentChecker = new HttpEstablishmentChecker(config.ORG_SERVICE_URL, config.INTERNAL_USER_ID);
+  const plugins = new HttpPluginGate(config.PLUGIN_CATALOG_SERVICE_URL);
+  const clock = () => new Date();
+  const booker = new ReservationBooker(uowGateway, { manageUrl: (token) => `${config.PUBLIC_RESERVATIONS_URL}/r/${token}` }, clock);
 
   const app = createApp({
     useCases: {
@@ -52,6 +75,19 @@ async function main(): Promise<void> {
       addScheduleException: new AddScheduleExceptionUseCase(uowGateway),
       removeScheduleException: new RemoveScheduleExceptionUseCase(uowGateway),
       previewSlots: new PreviewSlotsUseCase(repos),
+      getReservationSettings: new GetReservationSettingsUseCase(repos),
+      saveReservationSettings: new SaveReservationSettingsUseCase(uowGateway, establishmentChecker),
+      staffAvailability: new GetStaffAvailabilityUseCase(repos, clock),
+      listReservations: new ListReservationsUseCase(repos),
+      createStaffReservation: new CreateStaffReservationUseCase(repos, booker),
+      getReservation: new GetReservationUseCase(repos),
+      changeReservationStatus: new ChangeReservationStatusUseCase(uowGateway, repos),
+      cancelReservation: new CancelReservationUseCase(uowGateway, repos, clock),
+      publicRestaurant: new GetPublicRestaurantUseCase(repos, plugins),
+      publicAvailability: new GetPublicAvailabilityUseCase(repos, plugins, clock),
+      createPublicReservation: new CreatePublicReservationUseCase(repos, plugins, booker),
+      getReservationByToken: new GetReservationByTokenUseCase(repos, clock),
+      cancelReservationByToken: new CancelReservationByTokenUseCase(uowGateway, repos, clock),
     },
     corsOrigin: config.CORS_ORIGIN,
   });
@@ -66,7 +102,7 @@ async function main(): Promise<void> {
       exchange: 'crm.events',
     });
     await relay.start();
-    console.log('[restaurant-service] outbox relay activo (este servicio NO consume eventos en el entregable 1)');
+    console.log('[restaurant-service] outbox relay activo (este servicio no consume eventos; solo los publica)');
   } else {
     console.warn('[restaurant-service] RABBITMQ_URL no configurado: los eventos NO se publican');
   }

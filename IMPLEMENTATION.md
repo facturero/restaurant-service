@@ -48,6 +48,42 @@ previa, aislamiento entre organizaciones y permisos).
 
 ---
 
+## Estado del entregable 2 — reservas del cliente (2026-10-14)
+
+**Construido y verificado de punta a punta en local; sin desplegar.** Lo hizo Claude (sin opencode). Es el mayor cambio del servicio: añade el módulo `restaurant.reservations`, la página pública (repo aparte `reservas-web/`) y los correos.
+
+### Qué hay
+| Pieza | Dónde |
+|---|---|
+| Dominio puro (zona horaria, disponibilidad, asignación de mesas) | `src/domain/availability.ts`, `reservation.ts` |
+| Casos de uso | `src/application/use-cases/{create-reservation,availability-use-cases,reservation-management,reservation-settings-use-cases,reservation-context}.ts` |
+| Migración | `migrations/20261014100000-create-reservation-tables.cjs` (`reservation_settings`, `reservations`, `reservation_tables`) |
+| Rutas del personal (`/restaurant/…`, permisos `reservation:read/manage`) y públicas (`/public/…`, sin sesión) | `src/interface/http/reservation-*.ts`, contrato en `openapi.yaml` y `asyncapi.yaml` |
+| Correos | `notification-service`: plantillas `restaurant.reservation.{created,cancelled}[.staff].html`, y `extra` en `template-config.json` (varios correos por evento) |
+| Permisos / catálogo / gateway | `auth-service` `20261014100000`, `plugin-catalog-service` `20261014110000`, `api-gateway-node` (rutas antes del comodín, `/public/*` con límite por IP, CORS) |
+| CRM | `frontend`: pestañas «Reservas» y «Página de reservas» |
+| Sitio del cliente | `reservas-web/` (Vue 3, es/en, claro/oscuro, ~46 KB gzip) |
+
+### Decisiones
+- **Página pública = sitio aparte** (`reservas.noahsolution.com/<enlace>`), no una ruta del CRM. La reserva guarda solo los datos del cliente (no crea cliente del CRM).
+- **Nace confirmada** (sin garantía con tarjeta). `pending` existe en el modelo para el entregable 4.
+- **Mesas:** la más ajustada que respete capacidad mínima/máxima; si ninguna sirve, la menor cantidad de mesas sueltas (hasta el máximo del dueño), de la misma zona y lo más juntas posible. El margen de limpieza se cuenta después de cada comida.
+- **El enlace de la reserva** (`/r/<token>`) lleva un secreto de 256 bits; en la base solo queda su hash. El token sí viaja en el evento `created` (outbox y bitácora): lo ve quien tenga `audit:read`, que ya puede cancelar reservas.
+- **Quién recibe qué correo:** el cliente (confirmación y cancelación) y `notifyEmail` del restaurante, **solo** si la reserva fue en línea o la canceló el cliente (lo hecho por su propio personal no se avisa). Si falla el aviso al restaurante no se reencola (repetiría el correo al cliente).
+- **Contra reservas falsas:** el gateway deja 5 reservas / 10 min por IP; el servicio, 3 vigentes por correo o teléfono y un campo trampa. **No se verifica el correo del cliente** (ver COSAS-POR-HACER).
+
+### Bugs que las pruebas en memoria NO vieron (y por qué importan)
+1. **Doble reserva bajo concurrencia (el grave).** Con `SELECT … FOR UPDATE` sobre las mesas, 12 reservas simultáneas para 3 mesas aceptaban las 12. Bajo `REPEATABLE READ`, la lectura normal de la ocupación tras esperar el bloqueo sigue viendo la «foto» vieja de la transacción. Arreglo: `activeBookings` y `countUpcomingByGuest` leen con `lock: tx.LOCK.SHARE` (lectura actual), y el conteo por cliente va **después** del bloqueo. Verificado: 12 → exactamente 3; 5 rondas de 16 → 3 cada una; 12 del mismo cliente → exactamente 3. `persistence-guard.test.ts` impide que vuelva.
+2. En memoria no se puede probar esto (las pruebas son secuenciales). La carrera real se prueba contra MySQL con `scripts/verify-reservations.mjs` y `scripts/verify-reservations-race.mjs` (instrucciones en su encabezado).
+
+### Lo que NO se ha verificado
+- Despliegue real (k3s, Cloudflare, SOPS) del sitio y de los cambios en los demás servicios.
+- El correo real por SMTP de producción (en local sale por el Mailtrap de desarrollo).
+- Pantallas del CRM en modo oscuro/móvil y la página pública en iOS/Safari reales (solo Chromium con emulación móvil).
+- Reservas que cruzan la medianoche (no hay turnos que cruzan; una comida sí puede terminar pasada la medianoche y se contempla).
+
+---
+
 ## 0. Reglas antes de empezar (obligatorias)
 
 - **No hagas commit ni push.** El dueño crea el repo `facturero/restaurant-service` (rama `main`, como `notification-service`,

@@ -6,6 +6,9 @@ import {
   EstablishmentScheduleModel,
   FloorModel,
   OutboxModel,
+  ReservationModel,
+  ReservationSettingsModel,
+  ReservationTableModel,
   ScheduleExceptionModel,
   ScheduleShiftModel,
   ZoneModel,
@@ -18,11 +21,14 @@ import {
   ScheduleShift,
   Zone,
 } from '../../domain/entities.js';
+import { ACTIVE_STATUSES, Reservation, ReservationSettings } from '../../domain/reservation.js';
 import type {
   DiningTableRepository,
   DomainEvent,
   FloorRepository,
   OutboxRepository,
+  ReservationRepository,
+  ReservationSettingsRepository,
   ScheduleRepository,
   UnitOfWork,
   ZoneRepository,
@@ -126,6 +132,54 @@ function toException(m: ScheduleExceptionModel): ScheduleException {
     closesAt: toHhMm(m.closes_at),
     reason: m.reason,
     createdAt: m.created_at,
+  });
+}
+
+
+function toReservationSettings(m: ReservationSettingsModel): ReservationSettings {
+  return ReservationSettings.fromPersistence({
+    id: m.id,
+    organizationId: m.organization_id,
+    establishmentId: m.establishment_id,
+    enabled: Boolean(m.enabled),
+    publicSlug: m.public_slug,
+    displayName: m.display_name,
+    publicNote: m.public_note,
+    contactPhone: m.contact_phone,
+    notifyEmail: m.notify_email,
+    maxDaysAhead: Number(m.max_days_ahead),
+    minNoticeMinutes: Number(m.min_notice_minutes),
+    maxPartySize: Number(m.max_party_size),
+    maxTablesPerReservation: Number(m.max_tables_per_reservation),
+    createdAt: m.created_at,
+    updatedAt: m.updated_at,
+  });
+}
+
+function toReservation(m: ReservationModel): Reservation {
+  return Reservation.fromPersistence({
+    id: m.id,
+    organizationId: m.organization_id,
+    establishmentId: m.establishment_id,
+    code: m.code,
+    guestName: m.guest_name,
+    guestEmail: m.guest_email,
+    guestPhone: m.guest_phone,
+    partySize: Number(m.party_size),
+    onDate: m.on_date,
+    startsAt: m.starts_at,
+    endsAt: m.ends_at,
+    blockedUntil: m.blocked_until,
+    status: m.status,
+    source: m.source,
+    notes: m.notes,
+    cancelTokenHash: m.cancel_token_hash,
+    cancelledAt: m.cancelled_at,
+    cancelledBy: m.cancelled_by,
+    cancelReason: m.cancel_reason,
+    createdBy: m.created_by,
+    createdAt: m.created_at,
+    updatedAt: m.updated_at,
   });
 }
 
@@ -430,6 +484,189 @@ function scheduleRepository(tx?: Transaction): ScheduleRepository {
   };
 }
 
+
+function reservationSettingsRepository(tx?: Transaction): ReservationSettingsRepository {
+  return {
+    async findByEstablishment(organizationId, establishmentId) {
+      const m = await ReservationSettingsModel.findOne({
+        where: { organization_id: organizationId, establishment_id: establishmentId },
+        transaction: tx,
+      });
+      return m ? toReservationSettings(m) : null;
+    },
+    async findBySlug(slug) {
+      const m = await ReservationSettingsModel.findOne({ where: { public_slug: slug }, transaction: tx });
+      return m ? toReservationSettings(m) : null;
+    },
+    async slugTaken(slug, excludeId) {
+      const where: Record<string, unknown> = { public_slug: slug };
+      if (excludeId) where.id = { [Op.ne]: excludeId };
+      return (await ReservationSettingsModel.count({ where, transaction: tx })) > 0;
+    },
+    async save(settings) {
+      const p = settings.toPersistence();
+      const values = {
+        id: p.id,
+        organization_id: p.organizationId,
+        establishment_id: p.establishmentId,
+        enabled: p.enabled,
+        public_slug: p.publicSlug,
+        display_name: p.displayName,
+        public_note: p.publicNote,
+        contact_phone: p.contactPhone,
+        notify_email: p.notifyEmail,
+        max_days_ahead: p.maxDaysAhead,
+        min_notice_minutes: p.minNoticeMinutes,
+        max_party_size: p.maxPartySize,
+        max_tables_per_reservation: p.maxTablesPerReservation,
+        updated_at: new Date(),
+      };
+      // Sin `upsert`: el enlace público tiene su propio índice único y un duplicado debe fallar, no pisar a otro local.
+      if (await ReservationSettingsModel.findByPk(p.id, { attributes: ['id'], transaction: tx })) {
+        await ReservationSettingsModel.update(values, { where: { id: p.id }, transaction: tx });
+      } else {
+        await ReservationSettingsModel.create({ ...values, created_at: p.createdAt }, { transaction: tx });
+      }
+    },
+  };
+}
+
+function reservationRepository(tx?: Transaction): ReservationRepository {
+  return {
+    async save(reservation) {
+      const p = reservation.toPersistence();
+      const values = {
+        id: p.id,
+        organization_id: p.organizationId,
+        establishment_id: p.establishmentId,
+        code: p.code,
+        guest_name: p.guestName,
+        guest_email: p.guestEmail,
+        guest_phone: p.guestPhone,
+        party_size: p.partySize,
+        on_date: p.onDate,
+        starts_at: p.startsAt,
+        ends_at: p.endsAt,
+        blocked_until: p.blockedUntil,
+        status: p.status,
+        source: p.source,
+        notes: p.notes,
+        cancel_token_hash: p.cancelTokenHash,
+        cancelled_at: p.cancelledAt,
+        cancelled_by: p.cancelledBy,
+        cancel_reason: p.cancelReason,
+        created_by: p.createdBy,
+        updated_at: new Date(),
+      };
+      if (await ReservationModel.findByPk(p.id, { attributes: ['id'], transaction: tx })) {
+        await ReservationModel.update(values, { where: { id: p.id }, transaction: tx });
+      } else {
+        await ReservationModel.create({ ...values, created_at: p.createdAt }, { transaction: tx });
+      }
+    },
+    async findById(organizationId, reservationId) {
+      const m = await ReservationModel.findOne({ where: { id: reservationId, organization_id: organizationId }, transaction: tx });
+      return m ? toReservation(m) : null;
+    },
+    async findByTokenHash(hash) {
+      const m = await ReservationModel.findOne({ where: { cancel_token_hash: hash }, transaction: tx });
+      return m ? toReservation(m) : null;
+    },
+    async listByRange(organizationId, establishmentId, from, to, filters) {
+      const where: Record<string, unknown> = {
+        organization_id: organizationId,
+        establishment_id: establishmentId,
+        starts_at: { [Op.gte]: from, [Op.lt]: to },
+      };
+      if (filters?.statuses?.length) where.status = { [Op.in]: filters.statuses };
+      const rows = await ReservationModel.findAll({ where, transaction: tx, order: [['starts_at', 'ASC'], ['created_at', 'ASC']] });
+      return rows.map(toReservation);
+    },
+    async tableIdsFor(organizationId, reservationIds) {
+      const out = new Map<string, string[]>();
+      if (reservationIds.length === 0) return out;
+      const rows = await ReservationTableModel.findAll({
+        where: { organization_id: organizationId, reservation_id: { [Op.in]: reservationIds } },
+        transaction: tx,
+        order: [['table_id', 'ASC']],
+      });
+      for (const row of rows) {
+        const list = out.get(row.reservation_id) ?? [];
+        list.push(row.table_id);
+        out.set(row.reservation_id, list);
+      }
+      return out;
+    },
+    async assignTables(reservation, tableIds) {
+      for (const tableId of tableIds) {
+        await ReservationTableModel.create(
+          {
+            reservation_id: reservation.id,
+            table_id: tableId,
+            organization_id: reservation.organizationId,
+            blocked_from: reservation.startsAt,
+            blocked_until: reservation.blockedUntil,
+            active: true,
+          },
+          { transaction: tx },
+        );
+      }
+    },
+    async releaseTables(reservationId) {
+      await ReservationTableModel.update({ active: false }, { where: { reservation_id: reservationId }, transaction: tx });
+    },
+    async lockTables(organizationId, tableIds) {
+      if (!tx) throw new Error('lockTables necesita una transacción');
+      if (tableIds.length === 0) return;
+      // Siempre en el mismo orden (por id): dos reservas simultáneas no pueden quedarse esperándose una a otra (interbloqueo).
+      await DiningTableModel.findAll({
+        attributes: ['id'],
+        where: { organization_id: organizationId, id: { [Op.in]: tableIds } },
+        order: [['id', 'ASC']],
+        lock: tx.LOCK.UPDATE,
+        transaction: tx,
+      });
+    },
+    async activeBookings(organizationId, tableIds, from, until) {
+      if (tableIds.length === 0) return [];
+      const rows = await ReservationTableModel.findAll({
+        where: {
+          organization_id: organizationId,
+          table_id: { [Op.in]: tableIds },
+          active: true,
+          blocked_from: { [Op.lt]: until },
+          blocked_until: { [Op.gt]: from },
+        },
+        transaction: tx,
+        // Dentro de una transacción de escritura es una lectura ACTUAL (`FOR SHARE`), no la «foto» de REPEATABLE READ. Sin esto,
+        // quien esperó el bloqueo de `lockTables` seguiría viendo la ocupación de antes de esperar y aceptaría una mesa que otra
+        // transacción acaba de tomar (se comprobó: 12 reservas simultáneas para 3 mesas salían las 12). Fuera de transacción
+        // (consultas de disponibilidad) es una lectura normal.
+        ...(tx ? { lock: tx.LOCK.SHARE } : {}),
+      });
+      return rows.map((r) => ({ tableId: r.table_id, from: r.blocked_from.getTime(), until: r.blocked_until.getTime() }));
+    },
+    async countUpcomingByGuest(organizationId, establishmentId, guest, now) {
+      const who: Array<Record<string, unknown>> = [{ guest_phone: guest.phone }];
+      if (guest.email) who.push({ guest_email: guest.email });
+      // `findAll` y no `count`: Sequelize no admite `lock` en `count`, y aquí hace falta la lectura actual (ver `activeBookings`).
+      const rows = await ReservationModel.findAll({
+        attributes: ['id'],
+        where: {
+          organization_id: organizationId,
+          establishment_id: establishmentId,
+          status: { [Op.in]: ACTIVE_STATUSES },
+          starts_at: { [Op.gt]: now },
+          [Op.or]: who,
+        },
+        transaction: tx,
+        ...(tx ? { lock: tx.LOCK.SHARE } : {}),
+      });
+      return rows.length;
+    },
+  };
+}
+
 function outboxRepository(tx?: Transaction): OutboxRepository {
   return {
     async add(event: DomainEvent) {
@@ -459,6 +696,8 @@ export function buildRepositories(tx?: Transaction): UnitOfWork {
     zones: zoneRepository(tx),
     tables: diningTableRepository(tx),
     schedules: scheduleRepository(tx),
+    reservationSettings: reservationSettingsRepository(tx),
+    reservations: reservationRepository(tx),
     outbox: outboxRepository(tx),
   };
 }
@@ -471,6 +710,8 @@ export class SequelizeUnitOfWork implements WriteUnitOfWork {
   readonly zones: ZoneRepository;
   readonly tables: DiningTableRepository;
   readonly schedules: ScheduleRepository;
+  readonly reservationSettings: ReservationSettingsRepository;
+  readonly reservations: ReservationRepository;
   readonly outbox: OutboxRepository;
 
   constructor(readonly tx: Transaction) {
@@ -479,6 +720,8 @@ export class SequelizeUnitOfWork implements WriteUnitOfWork {
     this.zones = repos.zones;
     this.tables = repos.tables;
     this.schedules = repos.schedules;
+    this.reservationSettings = repos.reservationSettings;
+    this.reservations = repos.reservations;
     this.outbox = repos.outbox;
   }
 

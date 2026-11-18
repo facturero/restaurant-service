@@ -4,9 +4,11 @@ info:
   title: restaurant-service API
   version: 1.0.0
   description: >
-    Plugin de restaurantes — entregable 1: mapa del local. Plantas, zonas, mesas
-    (con posición y forma opcionales), un plano guardado como JSON versionado y
-    los horarios de atención con turnos y excepciones.
+    Plugin de restaurantes. Entregable 1: mapa del local (plantas, zonas, mesas con
+    posición y forma opcionales, un plano guardado como JSON versionado y los horarios
+    de atención con turnos y excepciones). Entregable 2: reservas del cliente final
+    (página pública, varias mesas por reserva, correos, enlace de cancelación) y su
+    gestión por el personal.
 
 
     Las rutas se sirven CON el prefijo `/restaurant` (el gateway reenvía
@@ -18,9 +20,18 @@ info:
     responde 404, nunca 403: no se filtra la existencia.
 
 
-    MÓDULO DE PAGO: el gateway exige el plugin `restaurant.floorplan`
-    (`requiresPlugin`) antes de reenviar nada; sin él la respuesta es
-    `403 PLUGIN_NOT_ACTIVE` y no llega a este servicio.
+    MÓDULOS DE PAGO: el gateway exige `restaurant.floorplan` para el mapa y
+    `restaurant.reservations` para las rutas de reservas del personal
+    (`requiresPlugin`); sin el módulo la respuesta es `403 PLUGIN_NOT_ACTIVE` y no
+    llega a este servicio.
+
+
+    RUTAS PÚBLICAS (`/public/…`): sin sesión ni cabeceras de contexto. El gateway las
+    deja pasar con límite de peticiones por IP; la organización la resuelve este
+    servicio a partir del enlace del restaurante o del token de la reserva, y ES ÉL
+    quien comprueba que `restaurant.reservations` esté contratado. Cualquier razón
+    para que un restaurante no esté abierto al público (no existe, apagado, sin el
+    módulo) responde igual, `404 RESTAURANT_NOT_FOUND`.
 
 
     MESAS NUNCA SE BORRAN: desactivar libera el nombre (y el índice único cubre
@@ -28,8 +39,8 @@ info:
     las reservas a esos ids. Tampoco hay DELETE de plantas ni de zonas.
 
 
-    Fuera de alcance de este entregable: reservas, página pública, correos y
-    garantía con tarjeta. El servicio NO consume eventos todavía.
+    Fuera de alcance por ahora: garantía con tarjeta, varias plantas en la interfaz
+    y el aviso en la campana del CRM. El servicio NO consume eventos.
 
 servers:
   - url: http://localhost:3015
@@ -44,6 +55,9 @@ tags:
   - name: tables
   - name: zones
   - name: schedule
+  - name: reservation-settings
+  - name: reservations
+  - name: public
 
 paths:
 
@@ -571,6 +585,413 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
               example: { code: SCHEDULE_EXCEPTION_NOT_FOUND, message: Excepción de horario no encontrada. }
+  # ── Reservas: personal (restaurant.reservations; permisos reservation:*) ───
+
+  /restaurant/establishments/{establishmentId}/reservation-settings:
+    get:
+      tags: [reservation-settings]
+      summary: Ajustes de reservas del local
+      description: Si el local nunca los configuró devuelve los valores por defecto (apagado, sin enlace), sin guardarlos.
+      x-required-permission: reservation:read
+      parameters:
+        - $ref: '#/components/parameters/OrgHeader'
+        - $ref: '#/components/parameters/EstablishmentId'
+      responses:
+        '200':
+          description: Ajustes
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReservationSettings' }
+        '401': { $ref: '#/components/responses/OrgContextRequired' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    put:
+      tags: [reservation-settings]
+      summary: Guardar ajustes de reservas (parcial)
+      description: >
+        Solo cambia los campos que vengan. No se puede encender (`enabled: true`) sin `publicSlug` ni `displayName`.
+        El enlace (`publicSlug`) es único en todo el sistema: repetido responde `409 SLUG_TAKEN`.
+      x-required-permission: reservation:manage
+      parameters:
+        - $ref: '#/components/parameters/OrgHeader'
+        - $ref: '#/components/parameters/EstablishmentId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReservationSettingsInput' }
+      responses:
+        '200':
+          description: Ajustes guardados
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReservationSettings' }
+        '401': { $ref: '#/components/responses/OrgContextRequired' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Establecimiento inexistente (`ESTABLISHMENT_NOT_FOUND`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: El enlace ya lo usa otro restaurante (`SLUG_TAKEN`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: Datos inválidos (`VALIDATION_ERROR`; `details` por campo)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /restaurant/establishments/{establishmentId}/availability:
+    get:
+      tags: [reservations]
+      summary: Horas disponibles de un día (vista del personal)
+      description: >
+        Igual que la página pública pero SIN el tope de días de anticipación ni la antelación mínima, y sin tope de
+        personas: el personal puede anotar una reserva de última hora. Una hora que ya pasó no se ofrece nunca.
+      x-required-permission: reservation:read
+      parameters:
+        - $ref: '#/components/parameters/OrgHeader'
+        - $ref: '#/components/parameters/EstablishmentId'
+        - $ref: '#/components/parameters/Date'
+        - $ref: '#/components/parameters/PartySize'
+      responses:
+        '200':
+          description: Disponibilidad del día
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DayAvailability' }
+        '401': { $ref: '#/components/responses/OrgContextRequired' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Local sin horario (`SCHEDULE_NOT_FOUND`); inicialícelo con `setup`
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: Parámetros inválidos (`VALIDATION_ERROR`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /restaurant/establishments/{establishmentId}/reservations:
+    get:
+      tags: [reservations]
+      summary: Lista de reservas de un día (o de los siguientes `days`)
+      description: Ordenadas por hora de inicio. `date` es el día LOCAL del restaurante.
+      x-required-permission: reservation:read
+      parameters:
+        - $ref: '#/components/parameters/OrgHeader'
+        - $ref: '#/components/parameters/EstablishmentId'
+        - { name: date, in: query, required: true, schema: { type: string, format: date } }
+        - { name: days, in: query, required: false, description: 'Cuántos días mostrar desde `date` (1 a 31, por defecto 1).', schema: { type: integer, minimum: 1, maximum: 31 } }
+        - { name: status, in: query, required: false, description: 'Estados separados por coma, p. ej. `confirmed,seated`.', schema: { type: string } }
+      responses:
+        '200':
+          description: Reservas
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Reservation' }
+        '401': { $ref: '#/components/responses/OrgContextRequired' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422':
+          description: Parámetros inválidos (`VALIDATION_ERROR`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    post:
+      tags: [reservations]
+      summary: Anotar una reserva (por teléfono o en persona)
+      description: >
+        No exige que la página pública esté encendida. El correo es opcional: sin él no hay aviso al cliente. Puede
+        indicar `tableIds` para sentar al grupo en mesas concretas; si no, el sistema elige (la más ajustada; si no
+        alcanza, varias mesas sueltas hasta el máximo del dueño, preferiblemente de una misma zona y cercanas).
+        Todo ocurre bajo bloqueo de las mesas: dos peticiones simultáneas no pueden quedarse con la misma.
+      x-required-permission: reservation:manage
+      parameters:
+        - $ref: '#/components/parameters/OrgHeader'
+        - $ref: '#/components/parameters/EstablishmentId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StaffReservationInput' }
+      responses:
+        '201':
+          description: Reserva creada
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Reservation' }
+        '401': { $ref: '#/components/responses/OrgContextRequired' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Local sin horario (`SCHEDULE_NOT_FOUND`) o mesa elegida inexistente (`TABLE_NOT_FOUND`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: Sin mesa libre a esa hora (`SLOT_TAKEN`) o mesas elegidas ocupadas (`TABLES_UNAVAILABLE`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: Hora no ofrecida (`SLOT_NOT_OFFERED`), grupo que no cabe (`PARTY_SIZE_NOT_ALLOWED`) o datos inválidos (`VALIDATION_ERROR`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /restaurant/reservations/{id}:
+    get:
+      tags: [reservations]
+      summary: Detalle de una reserva
+      x-required-permission: reservation:read
+      parameters:
+        - $ref: '#/components/parameters/OrgHeader'
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Reserva
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Reservation' }
+        '401': { $ref: '#/components/responses/OrgContextRequired' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Inexistente o de otra organización (`RESERVATION_NOT_FOUND`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /restaurant/reservations/{id}/status:
+    patch:
+      tags: [reservations]
+      summary: Sentar, terminar o marcar «no se presentó»
+      description: >
+        Transiciones válidas: `confirmed → seated | no_show`, `seated → completed`, `pending → confirmed`. Terminar o
+        marcar «no se presentó» libera las mesas. Para cancelar use `POST …/cancel`.
+      x-required-permission: reservation:manage
+      parameters:
+        - $ref: '#/components/parameters/OrgHeader'
+        - $ref: '#/components/parameters/Id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { $ref: '#/components/schemas/ReservationStatus' }
+      responses:
+        '200':
+          description: Reserva actualizada
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Reservation' }
+        '401': { $ref: '#/components/responses/OrgContextRequired' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Inexistente o de otra organización (`RESERVATION_NOT_FOUND`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: Transición no permitida (`INVALID_RESERVATION_TRANSITION`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: Estado no válido (`VALIDATION_ERROR`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /restaurant/reservations/{id}/cancel:
+    post:
+      tags: [reservations]
+      summary: Cancelar una reserva (personal)
+      description: Libera las mesas y publica `restaurant.reservation.cancelled` (el cliente recibe un correo si dejó el suyo).
+      x-required-permission: reservation:manage
+      parameters:
+        - $ref: '#/components/parameters/OrgHeader'
+        - $ref: '#/components/parameters/Id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string, maxLength: 300, nullable: true }
+      responses:
+        '200':
+          description: Reserva cancelada
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Reservation' }
+        '401': { $ref: '#/components/responses/OrgContextRequired' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Inexistente o de otra organización (`RESERVATION_NOT_FOUND`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: Ya estaba cancelada o terminada (`INVALID_RESERVATION_TRANSITION`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  # ── Reservas: cliente final (SIN sesión; límite de peticiones por IP en el gateway) ──
+
+  /public/restaurants/{slug}:
+    get:
+      tags: [public]
+      summary: Ficha pública del restaurante
+      description: Nombre, nota, teléfono, zona horaria, límites y días de la semana con servicio. Nada interno.
+      parameters:
+        - $ref: '#/components/parameters/Slug'
+      responses:
+        '200':
+          description: Ficha
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PublicRestaurant' }
+        '404':
+          description: No existe, está apagado o no tiene el módulo (`RESTAURANT_NOT_FOUND`; siempre igual)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /public/restaurants/{slug}/availability:
+    get:
+      tags: [public]
+      summary: Horas disponibles de un día para un grupo
+      description: >
+        Aplica el tope de días de anticipación y la antelación mínima del dueño. `status` del día: `open`, `closed`
+        (sin turnos o con cierre), `past` o `too_far`. Cada hora trae `available` y, si no, `reason` (`full` o `notice`).
+        Un grupo mayor al máximo del dueño, o que no cabe ni con todas las mesas permitidas, recibe `422` con el
+        teléfono del restaurante si lo dejó.
+      parameters:
+        - $ref: '#/components/parameters/Slug'
+        - $ref: '#/components/parameters/Date'
+        - $ref: '#/components/parameters/PartySize'
+      responses:
+        '200':
+          description: "Disponibilidad del día (`Cache-Control: no-store`)"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DayAvailability' }
+        '404':
+          description: Restaurante no encontrado (`RESTAURANT_NOT_FOUND`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: Parámetros inválidos o grupo fuera de rango (`PARTY_SIZE_NOT_ALLOWED`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /public/restaurants/{slug}/reservations:
+    post:
+      tags: [public]
+      summary: Reservar
+      description: >
+        Nace confirmada (no hay garantía con tarjeta todavía). Devuelve un `token`: es el secreto del enlace de la
+        reserva (`<sitio>/r/<token>`); en la base solo se guarda su hash. Máximo 3 reservas vigentes por correo o
+        teléfono en un mismo local (`429 TOO_MANY_RESERVATIONS`). `website` es un campo trampa para robots: debe ir vacío.
+      parameters:
+        - $ref: '#/components/parameters/Slug'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PublicReservationInput' }
+      responses:
+        '201':
+          description: Reserva creada
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string, description: 'Secreto del enlace; 43 caracteres base64url.' }
+                  reservation: { $ref: '#/components/schemas/PublicReservation' }
+        '404':
+          description: Restaurante no encontrado (`RESTAURANT_NOT_FOUND`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: Justo se ocupó esa hora (`SLOT_TAKEN`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: Hora no ofrecida (`SLOT_NOT_OFFERED`), grupo fuera de rango (`PARTY_SIZE_NOT_ALLOWED`) o datos inválidos (`VALIDATION_ERROR`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429':
+          description: Demasiadas reservas vigentes (`TOO_MANY_RESERVATIONS`) o límite de peticiones del gateway (`RATE_LIMIT_EXCEEDED`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /public/reservations/{token}:
+    get:
+      tags: [public]
+      summary: Ver una reserva con su enlace
+      description: No devuelve correo, teléfono ni notas, porque el enlace puede reenviarse.
+      parameters:
+        - $ref: '#/components/parameters/Token'
+      responses:
+        '200':
+          description: Reserva
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PublicReservation' }
+        '404':
+          description: Token desconocido (`RESERVATION_NOT_FOUND`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /public/reservations/{token}/cancel:
+    post:
+      tags: [public]
+      summary: Cancelar una reserva con su enlace
+      description: Solo mientras esté vigente y antes de la hora. Libera las mesas, avisa al restaurante y confirma al cliente por correo.
+      parameters:
+        - $ref: '#/components/parameters/Token'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string, maxLength: 300 }
+      responses:
+        '200':
+          description: Reserva cancelada
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PublicReservation' }
+        '404':
+          description: Token desconocido (`RESERVATION_NOT_FOUND`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: Ya cancelada, terminada o pasada la hora (`INVALID_RESERVATION_TRANSITION`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
 
 components:
 
@@ -595,6 +1016,29 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    Date:
+      name: date
+      in: query
+      required: true
+      description: Día local del restaurante.
+      schema: { type: string, format: date }
+    PartySize:
+      name: partySize
+      in: query
+      required: true
+      schema: { type: integer, minimum: 1 }
+    Slug:
+      name: slug
+      in: path
+      required: true
+      description: Enlace público del restaurante (`reservation-settings.publicSlug`).
+      schema: { type: string }
+    Token:
+      name: token
+      in: path
+      required: true
+      description: Secreto del enlace de la reserva.
+      schema: { type: string }
 
   schemas:
 
@@ -981,6 +1425,157 @@ components:
         opensAt: { type: string, nullable: true, description: Obligatorio cuando kind es special_hours. }
         closesAt: { type: string, nullable: true }
         reason: { type: string, maxLength: 120, nullable: true }
+
+    ReservationStatus:
+      type: string
+      enum: [pending, confirmed, seated, completed, cancelled, no_show]
+
+    ReservationSettings:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        establishmentId: { type: string, format: uuid }
+        enabled: { type: boolean, description: Interruptor del dueño para la página pública. }
+        publicSlug: { type: string, nullable: true, description: 'Enlace público; 3 a 60 caracteres [a-z0-9-], único en todo el sistema.' }
+        displayName: { type: string, nullable: true }
+        publicNote: { type: string, nullable: true, maxLength: 500 }
+        contactPhone: { type: string, nullable: true }
+        notifyEmail: { type: string, nullable: true, description: A dónde avisar de cada reserva o cancelación en línea. }
+        maxDaysAhead: { type: integer, minimum: 1, maximum: 365 }
+        minNoticeMinutes: { type: integer, minimum: 0, maximum: 10080 }
+        maxPartySize: { type: integer, minimum: 1, maximum: 100 }
+        maxTablesPerReservation: { type: integer, minimum: 1, maximum: 10 }
+        updatedAt: { type: string, format: date-time }
+
+    ReservationSettingsInput:
+      type: object
+      description: Todos los campos son opcionales; solo cambian los que vengan.
+      properties:
+        enabled: { type: boolean }
+        publicSlug: { type: string, nullable: true }
+        displayName: { type: string, nullable: true, maxLength: 120 }
+        publicNote: { type: string, nullable: true, maxLength: 500 }
+        contactPhone: { type: string, nullable: true, maxLength: 40 }
+        notifyEmail: { type: string, nullable: true, maxLength: 160 }
+        maxDaysAhead: { type: integer }
+        minNoticeMinutes: { type: integer }
+        maxPartySize: { type: integer }
+        maxTablesPerReservation: { type: integer }
+
+    AvailabilitySlot:
+      type: object
+      properties:
+        time: { type: string, example: '19:30', description: Hora local HH:mm. }
+        startsAt: { type: string, format: date-time }
+        shiftLabel: { type: string, nullable: true }
+        available: { type: boolean }
+        reason: { type: string, enum: [full, notice], description: Solo si no está disponible. }
+
+    DayAvailability:
+      type: object
+      properties:
+        date: { type: string, format: date }
+        status: { type: string, enum: [open, closed, past, too_far] }
+        slots:
+          type: array
+          items: { $ref: '#/components/schemas/AvailabilitySlot' }
+
+    PublicRestaurant:
+      type: object
+      properties:
+        slug: { type: string }
+        name: { type: string }
+        note: { type: string, nullable: true }
+        phone: { type: string, nullable: true }
+        timezone: { type: string, example: America/Guayaquil }
+        maxPartySize: { type: integer }
+        maxDaysAhead: { type: integer }
+        minNoticeMinutes: { type: integer }
+        openWeekdays:
+          type: array
+          description: Días con servicio (0 = domingo … 6 = sábado).
+          items: { type: integer }
+
+    Reservation:
+      type: object
+      description: Vista del personal (lleva contacto y notas).
+      properties:
+        id: { type: string, format: uuid }
+        establishmentId: { type: string, format: uuid }
+        code: { type: string }
+        status: { $ref: '#/components/schemas/ReservationStatus' }
+        source: { type: string, enum: [online, staff] }
+        guestName: { type: string }
+        guestEmail: { type: string, nullable: true }
+        guestPhone: { type: string }
+        partySize: { type: integer }
+        date: { type: string, format: date }
+        time: { type: string, example: '19:30' }
+        startsAt: { type: string, format: date-time }
+        endsAt: { type: string, format: date-time, description: Fin de la comida (sin el margen de limpieza). }
+        notes: { type: string, nullable: true }
+        tables:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string, format: uuid }
+              name: { type: string }
+        cancelledAt: { type: string, format: date-time, nullable: true }
+        cancelledBy: { type: string, enum: [guest, staff], nullable: true }
+        cancelReason: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+
+    PublicReservation:
+      type: object
+      description: Vista del cliente. Sin correo, teléfono ni notas.
+      properties:
+        code: { type: string }
+        status: { $ref: '#/components/schemas/ReservationStatus' }
+        guestName: { type: string }
+        partySize: { type: integer }
+        date: { type: string, format: date }
+        time: { type: string }
+        startsAt: { type: string, format: date-time }
+        endsAt: { type: string, format: date-time }
+        timezone: { type: string }
+        restaurant:
+          type: object
+          properties:
+            name: { type: string }
+            phone: { type: string, nullable: true }
+            slug: { type: string, nullable: true }
+        canCancel: { type: boolean }
+        cancelledBy: { type: string, enum: [guest, staff], nullable: true }
+
+    StaffReservationInput:
+      type: object
+      required: [date, time, partySize, guestName, guestPhone]
+      properties:
+        date: { type: string, format: date }
+        time: { type: string, example: '20:00' }
+        partySize: { type: integer, minimum: 1 }
+        guestName: { type: string }
+        guestPhone: { type: string }
+        guestEmail: { type: string, nullable: true }
+        notes: { type: string, nullable: true, maxLength: 500 }
+        tableIds:
+          type: array
+          maxItems: 10
+          items: { type: string, format: uuid }
+
+    PublicReservationInput:
+      type: object
+      required: [date, time, partySize, guestName, guestEmail, guestPhone]
+      properties:
+        date: { type: string, format: date }
+        time: { type: string, example: '19:30' }
+        partySize: { type: integer, minimum: 1 }
+        guestName: { type: string }
+        guestEmail: { type: string }
+        guestPhone: { type: string }
+        notes: { type: string, nullable: true, maxLength: 500 }
+        website: { type: string, description: Campo trampa para robots; debe ir vacío o ausente. }
 
   responses:
     ValidationError:

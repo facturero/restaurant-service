@@ -1,3 +1,5 @@
+import type { TableBooking } from './availability.js';
+import type { Reservation, ReservationSettings, ReservationStatus } from './reservation.js';
 import type {
   DiningTable,
   EntityStatus,
@@ -56,6 +58,51 @@ export interface ScheduleRepository {
   deleteException(organizationId: string, exceptionId: string): Promise<void>;
 }
 
+export interface ReservationSettingsRepository {
+  findByEstablishment(organizationId: string, establishmentId: string): Promise<ReservationSettings | null>;
+  /** Pública: el enlace es único en todo el sistema, no por organización. */
+  findBySlug(slug: string): Promise<ReservationSettings | null>;
+  slugTaken(slug: string, excludeId?: string): Promise<boolean>;
+  save(settings: ReservationSettings): Promise<void>;
+}
+
+export interface ReservationListFilters {
+  statuses?: ReservationStatus[];
+}
+
+export interface ReservationRepository {
+  /** Inserta o actualiza por clave primaria (nunca `upsert`: ver `persistence-guard.test.ts`). */
+  save(reservation: Reservation): Promise<void>;
+  findById(organizationId: string, reservationId: string): Promise<Reservation | null>;
+  /** Pública: se busca por el hash del token del enlace, sin organización. */
+  findByTokenHash(hash: string): Promise<Reservation | null>;
+  /** Reservas cuyo inicio cae en [from, to). */
+  listByRange(
+    organizationId: string,
+    establishmentId: string,
+    from: Date,
+    to: Date,
+    filters?: ReservationListFilters,
+  ): Promise<Reservation[]>;
+  /** Mesas asignadas a cada reserva (aunque ya estén liberadas: es el historial). */
+  tableIdsFor(organizationId: string, reservationIds: string[]): Promise<Map<string, string[]>>;
+  /** Bloquea esas mesas en el intervalo de la reserva. */
+  assignTables(reservation: Reservation, tableIds: string[]): Promise<void>;
+  /** Libera las mesas (cancelada, terminada, no se presentó): la reserva conserva el historial. */
+  releaseTables(reservationId: string): Promise<void>;
+  /** Bloqueo pesimista de las mesas candidatas, en orden estable: serializa a quienes piden la misma mesa a la vez. */
+  lockTables(organizationId: string, tableIds: string[]): Promise<void>;
+  /** Ocupación activa de esas mesas que se cruza con [from, until). */
+  activeBookings(organizationId: string, tableIds: string[], from: Date, until: Date): Promise<TableBooking[]>;
+  /** Reservas vigentes (activas y por venir) de un mismo correo o teléfono en el local: freno contra reservas falsas. */
+  countUpcomingByGuest(
+    organizationId: string,
+    establishmentId: string,
+    guest: { email?: string | null; phone: string },
+    now: Date,
+  ): Promise<number>;
+}
+
 /** Evento de dominio saliente: se persiste en `outbox_messages` y el relay lo
  *  publica a RabbitMQ. El payload debe ser plano y serializable. */
 export interface DomainEvent {
@@ -77,6 +124,8 @@ export interface UnitOfWork {
   zones: ZoneRepository;
   tables: DiningTableRepository;
   schedules: ScheduleRepository;
+  reservationSettings: ReservationSettingsRepository;
+  reservations: ReservationRepository;
   outbox: OutboxRepository;
 }
 

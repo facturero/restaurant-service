@@ -5,8 +5,9 @@ info:
   version: 1.0.0
   description: >
     Eventos de restaurant-service sobre RabbitMQ. Publica los cambios del mapa del
-    local (plantas, plano, mesas, zonas) y del horario. **NO consume eventos en el
-    entregable 1**: no hay consumidores ni `processed_events` en uso todavía.
+    local (plantas, plano, mesas, zonas), del horario y —desde el entregable 2— de las
+    reservas (ajustes, creación, cancelación y cambios de estado). **No consume eventos**:
+    no hay consumidores ni `processed_events` en uso.
 
 
     Patrón Outbox + relay. Exchange topic `crm.events`. El `outbox-relay` pone
@@ -115,6 +116,45 @@ channels:
       amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
     messages:
       scheduleExceptionDeleted: { $ref: '#/components/messages/ScheduleExceptionDeleted' }
+  reservationSettingsUpdated:
+    address: restaurant.reservation_settings.updated
+    description: El dueño guardó los ajustes de reservas del local (página pública, límites).
+    servers: [{ $ref: '#/servers/rabbitmq' }]
+    bindings:
+      amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
+    messages:
+      reservationSettingsUpdated: { $ref: '#/components/messages/ReservationSettingsUpdated' }
+
+  reservationCreated:
+    address: restaurant.reservation.created
+    description: >
+      Se creó una reserva (desde la página pública o anotada por el personal). `notification-service` envía la
+      confirmación al cliente (`guestEmail`, si hay) y el aviso al restaurante (`staffNoticeEmail`, solo si la reserva
+      es en línea). Lleva `manageUrl` con el token del enlace de cancelación: está también en el outbox y en la bitácora.
+    servers: [{ $ref: '#/servers/rabbitmq' }]
+    bindings:
+      amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
+    messages:
+      reservationCreated: { $ref: '#/components/messages/ReservationCreated' }
+
+  reservationCancelled:
+    address: restaurant.reservation.cancelled
+    description: >
+      Se canceló una reserva (el cliente desde su enlace, o el personal). `staffNoticeEmail` solo viene cuando canceló el cliente.
+    servers: [{ $ref: '#/servers/rabbitmq' }]
+    bindings:
+      amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
+    messages:
+      reservationCancelled: { $ref: '#/components/messages/ReservationCancelled' }
+
+  reservationStatusChanged:
+    address: restaurant.reservation.status_changed
+    description: El personal sentó la mesa, la dio por terminada o marcó que el cliente no se presentó.
+    servers: [{ $ref: '#/servers/rabbitmq' }]
+    bindings:
+      amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
+    messages:
+      reservationStatusChanged: { $ref: '#/components/messages/ReservationStatusChanged' }
 
 operations:
 
@@ -149,6 +189,21 @@ operations:
   publishScheduleExceptionDeleted:
     action: send
     channel: { $ref: '#/channels/scheduleExceptionDeleted' }
+  publishReservationSettingsUpdated:
+    action: send
+    channel: { $ref: '#/channels/reservationSettingsUpdated' }
+
+  publishReservationCreated:
+    action: send
+    channel: { $ref: '#/channels/reservationCreated' }
+
+  publishReservationCancelled:
+    action: send
+    channel: { $ref: '#/channels/reservationCancelled' }
+
+  publishReservationStatusChanged:
+    action: send
+    channel: { $ref: '#/channels/reservationStatusChanged' }
 
 components:
 
@@ -220,6 +275,40 @@ components:
       contentType: application/json
       traits: [{ $ref: '#/components/messageTraits/eventEnvelope' }]
       payload: { $ref: '#/components/schemas/ScheduleExceptionPayload' }
+
+    ReservationSettingsUpdated:
+      name: restaurant.reservation_settings.updated
+      title: Ajustes de reservas guardados
+      contentType: application/json
+      traits: [{ $ref: '#/components/messageTraits/eventEnvelope' }]
+      payload: { $ref: '#/components/schemas/ReservationSettingsPayload' }
+
+    ReservationCreated:
+      name: restaurant.reservation.created
+      title: Reserva creada
+      contentType: application/json
+      traits: [{ $ref: '#/components/messageTraits/eventEnvelope' }]
+      payload: { $ref: '#/components/schemas/ReservationNoticePayload' }
+
+    ReservationCancelled:
+      name: restaurant.reservation.cancelled
+      title: Reserva cancelada
+      contentType: application/json
+      traits: [{ $ref: '#/components/messageTraits/eventEnvelope' }]
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/ReservationNoticePayload'
+          - type: object
+            properties:
+              cancelledBy: { type: string, enum: [guest, staff] }
+              cancelReason: { type: string, description: Cadena vacía si no hay motivo. }
+
+    ReservationStatusChanged:
+      name: restaurant.reservation.status_changed
+      title: Estado de la reserva cambiado
+      contentType: application/json
+      traits: [{ $ref: '#/components/messageTraits/eventEnvelope' }]
+      payload: { $ref: '#/components/schemas/ReservationStatusChangedPayload' }
 
   schemas:
 
@@ -301,4 +390,56 @@ components:
         exceptionId: { type: string, format: uuid }
         onDate: { type: string, format: date }
         kind: { type: string, enum: [closed, special_hours] }
+        organizationId: { type: string, format: uuid }
+
+    ReservationSettingsPayload:
+      type: object
+      required: [establishmentId, enabled, maxDaysAhead, minNoticeMinutes, maxPartySize, maxTablesPerReservation, organizationId]
+      properties:
+        establishmentId: { type: string, format: uuid }
+        enabled: { type: boolean }
+        publicSlug: { type: string, nullable: true }
+        maxDaysAhead: { type: integer }
+        minNoticeMinutes: { type: integer }
+        maxPartySize: { type: integer }
+        maxTablesPerReservation: { type: integer }
+        organizationId: { type: string, format: uuid }
+
+    ReservationNoticePayload:
+      type: object
+      description: >
+        Todo lo que necesitan los correos, ya listo para la plantilla. Las cadenas vacías significan «no hay»
+        (la plantilla de correo trata un destinatario vacío como «no enviar»); por eso no se usa `null`.
+      required: [reservationId, establishmentId, code, status, source, guestName, guestPhone, partySize, onDate, startsAt, timeText, dateText, restaurantName, organizationId]
+      properties:
+        reservationId: { type: string, format: uuid }
+        establishmentId: { type: string, format: uuid }
+        code: { type: string, description: 'Código corto que el cliente puede dictar por teléfono (8 caracteres sin 0/O/1/I/L).' }
+        status: { type: string, enum: [pending, confirmed, seated, completed, cancelled, no_show] }
+        source: { type: string, enum: [online, staff] }
+        guestName: { type: string }
+        guestEmail: { type: string, description: Vacío si la reserva se anotó por teléfono sin correo. }
+        guestPhone: { type: string }
+        partySize: { type: integer }
+        notes: { type: string }
+        onDate: { type: string, format: date, description: Fecha local del restaurante. }
+        startsAt: { type: string, format: date-time, description: UTC. }
+        timeText: { type: string, description: Hora local, HH:mm. }
+        dateText: { type: string, description: 'Fecha local legible en español, p. ej. «sábado, 17 de octubre de 2026».' }
+        restaurantName: { type: string }
+        restaurantPhone: { type: string }
+        staffNoticeEmail: { type: string, description: A dónde avisar al restaurante; vacío si no corresponde (lo hizo su propio personal). }
+        tableNames: { type: string, description: 'Mesas separadas por coma.' }
+        manageUrl: { type: string, description: Enlace para ver o cancelar sin sesión; solo en `created`. }
+        organizationId: { type: string, format: uuid }
+
+    ReservationStatusChangedPayload:
+      type: object
+      required: [reservationId, establishmentId, code, previous, status, organizationId]
+      properties:
+        reservationId: { type: string, format: uuid }
+        establishmentId: { type: string, format: uuid }
+        code: { type: string }
+        previous: { type: string, enum: [pending, confirmed, seated, completed, cancelled, no_show] }
+        status: { type: string, enum: [pending, confirmed, seated, completed, cancelled, no_show] }
         organizationId: { type: string, format: uuid }

@@ -1,6 +1,7 @@
 import { DataTypes, type InferAttributes, type InferCreationAttributes, Model } from 'sequelize';
 import type { ScheduleExceptionKind, TableShape, ZoneColor } from '../../domain/entities.js';
 import type { PartyDuration } from '../../domain/schedule.js';
+import type { CancelledBy, ReservationSource, ReservationStatus } from '../../domain/reservation.js';
 import { sequelize } from './sequelize.js';
 
 // Nota: `active_name` de dining_tables es una columna GENERADA (IF(status='active',
@@ -195,6 +196,125 @@ ScheduleExceptionModel.init(
     created_at: DataTypes.DATE,
   },
   { sequelize, tableName: 'schedule_exceptions', timestamps: false },
+);
+
+export class ReservationSettingsModel extends Model<
+  InferAttributes<ReservationSettingsModel>,
+  InferCreationAttributes<ReservationSettingsModel>
+> {
+  declare id: string;
+  declare organization_id: string;
+  declare establishment_id: string;
+  declare enabled: boolean;
+  declare public_slug: string | null;
+  declare display_name: string | null;
+  declare public_note: string | null;
+  declare contact_phone: string | null;
+  declare notify_email: string | null;
+  declare max_days_ahead: number;
+  declare min_notice_minutes: number;
+  declare max_party_size: number;
+  declare max_tables_per_reservation: number;
+  declare created_at: Date;
+  declare updated_at: Date;
+}
+
+ReservationSettingsModel.init(
+  {
+    id: { type: DataTypes.CHAR(36), primaryKey: true },
+    organization_id: { type: DataTypes.CHAR(36), allowNull: false },
+    establishment_id: { type: DataTypes.CHAR(36), allowNull: false },
+    enabled: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+    public_slug: { type: DataTypes.STRING(60), allowNull: true },
+    display_name: { type: DataTypes.STRING(120), allowNull: true },
+    public_note: { type: DataTypes.STRING(500), allowNull: true },
+    contact_phone: { type: DataTypes.STRING(40), allowNull: true },
+    notify_email: { type: DataTypes.STRING(160), allowNull: true },
+    max_days_ahead: { type: DataTypes.SMALLINT, allowNull: false, defaultValue: 30 },
+    min_notice_minutes: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 60 },
+    max_party_size: { type: DataTypes.SMALLINT, allowNull: false, defaultValue: 10 },
+    max_tables_per_reservation: { type: DataTypes.TINYINT, allowNull: false, defaultValue: 3 },
+    created_at: DataTypes.DATE,
+    updated_at: DataTypes.DATE,
+  },
+  { sequelize, tableName: 'reservation_settings', timestamps: false },
+);
+
+export class ReservationModel extends Model<InferAttributes<ReservationModel>, InferCreationAttributes<ReservationModel>> {
+  declare id: string;
+  declare organization_id: string;
+  declare establishment_id: string;
+  declare code: string;
+  declare guest_name: string;
+  declare guest_email: string | null;
+  declare guest_phone: string;
+  declare party_size: number;
+  declare on_date: string;
+  declare starts_at: Date;
+  declare ends_at: Date;
+  declare blocked_until: Date;
+  declare status: ReservationStatus;
+  declare source: ReservationSource;
+  declare notes: string | null;
+  declare cancel_token_hash: string;
+  declare cancelled_at: Date | null;
+  declare cancelled_by: CancelledBy | null;
+  declare cancel_reason: string | null;
+  declare created_by: string | null;
+  declare created_at: Date;
+  declare updated_at: Date;
+}
+
+ReservationModel.init(
+  {
+    id: { type: DataTypes.CHAR(36), primaryKey: true },
+    organization_id: { type: DataTypes.CHAR(36), allowNull: false },
+    establishment_id: { type: DataTypes.CHAR(36), allowNull: false },
+    code: { type: DataTypes.CHAR(8), allowNull: false },
+    guest_name: { type: DataTypes.STRING(120), allowNull: false },
+    guest_email: { type: DataTypes.STRING(160), allowNull: true },
+    guest_phone: { type: DataTypes.STRING(40), allowNull: false },
+    party_size: { type: DataTypes.SMALLINT, allowNull: false },
+    on_date: { type: DataTypes.DATEONLY, allowNull: false },
+    starts_at: { type: DataTypes.DATE, allowNull: false },
+    ends_at: { type: DataTypes.DATE, allowNull: false },
+    blocked_until: { type: DataTypes.DATE, allowNull: false },
+    status: { type: DataTypes.ENUM('pending', 'confirmed', 'seated', 'completed', 'cancelled', 'no_show'), allowNull: false, defaultValue: 'confirmed' },
+    source: { type: DataTypes.ENUM('online', 'staff'), allowNull: false },
+    notes: { type: DataTypes.STRING(500), allowNull: true },
+    cancel_token_hash: { type: DataTypes.CHAR(64), allowNull: false },
+    cancelled_at: { type: DataTypes.DATE, allowNull: true },
+    cancelled_by: { type: DataTypes.ENUM('guest', 'staff'), allowNull: true },
+    cancel_reason: { type: DataTypes.STRING(300), allowNull: true },
+    created_by: { type: DataTypes.CHAR(36), allowNull: true },
+    created_at: DataTypes.DATE,
+    updated_at: DataTypes.DATE,
+  },
+  { sequelize, tableName: 'reservations', timestamps: false },
+);
+
+export class ReservationTableModel extends Model<
+  InferAttributes<ReservationTableModel>,
+  InferCreationAttributes<ReservationTableModel>
+> {
+  declare reservation_id: string;
+  declare table_id: string;
+  declare organization_id: string;
+  declare blocked_from: Date;
+  declare blocked_until: Date;
+  declare active: boolean;
+}
+
+ReservationTableModel.init(
+  {
+    reservation_id: { type: DataTypes.CHAR(36), primaryKey: true },
+    table_id: { type: DataTypes.CHAR(36), primaryKey: true },
+    organization_id: { type: DataTypes.CHAR(36), allowNull: false },
+    blocked_from: { type: DataTypes.DATE, allowNull: false },
+    blocked_until: { type: DataTypes.DATE, allowNull: false },
+    active: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
+  },
+  { sequelize, tableName: 'reservation_tables', timestamps: false },
 );
 
 export class OutboxModel extends Model<InferAttributes<OutboxModel>, InferCreationAttributes<OutboxModel>> {

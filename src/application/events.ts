@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import type { DiningTable, EstablishmentSchedule, Floor, ScheduleException, Zone } from '../domain/entities.js';
 import type { DomainEvent } from '../domain/repositories.js';
+import type { Reservation, ReservationSettings, ReservationStatus } from '../domain/reservation.js';
+import { utcToLocal } from '../domain/availability.js';
 
 /** Construye un DomainEvent con el envelope de bitácora (eventId/type/occurredAt). */
 export function domainEvent(params: {
@@ -135,6 +137,112 @@ function exceptionEvent(type: string, exception: ScheduleException, establishmen
       exceptionId: exception.id,
       onDate: exception.onDate,
       kind: exception.kind,
+    },
+  });
+}
+
+// ── Reservas ────────────────────────────────────────────────────────────────
+
+export function reservationSettingsUpdatedEvent(settings: ReservationSettings): DomainEvent {
+  return domainEvent({
+    type: 'restaurant.reservation_settings.updated',
+    aggregateType: 'reservation_settings',
+    aggregateId: settings.id,
+    organizationId: settings.organizationId,
+    payload: {
+      establishmentId: settings.establishmentId,
+      enabled: settings.enabled,
+      publicSlug: settings.publicSlug,
+      maxDaysAhead: settings.maxDaysAhead,
+      minNoticeMinutes: settings.minNoticeMinutes,
+      maxPartySize: settings.maxPartySize,
+      maxTablesPerReservation: settings.maxTablesPerReservation,
+    },
+  });
+}
+
+/** Lo que el correo necesita saber y la reserva sola no dice: el local, las mesas y los enlaces. */
+export interface ReservationNoticeContext {
+  restaurantName: string;
+  restaurantPhone: string | null;
+  /** Dónde se avisa al restaurante (correo de avisos del local). */
+  notifyEmail: string | null;
+  timezone: string;
+  tableNames: string[];
+  /** Enlace para ver o cancelar sin iniciar sesión. Solo existe en el momento de crear (el token no se guarda). */
+  manageUrl?: string;
+}
+
+function noticePayload(reservation: Reservation, ctx: ReservationNoticeContext, noticeStaff: boolean): Record<string, unknown> {
+  const local = utcToLocal(reservation.startsAt, ctx.timezone);
+  const dateText = new Intl.DateTimeFormat('es-EC', {
+    timeZone: ctx.timezone,
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+  }).format(reservation.startsAt);
+  return {
+    reservationId: reservation.id,
+    establishmentId: reservation.establishmentId,
+    code: reservation.code,
+    status: reservation.status,
+    source: reservation.source,
+    guestName: reservation.guestName,
+    // Cadena vacía (no null): la plantilla de correo la trata como «sin destinatario» y omite el envío al cliente.
+    guestEmail: reservation.guestEmail ?? '',
+    guestPhone: reservation.guestPhone,
+    partySize: reservation.partySize,
+    notes: reservation.notes ?? '',
+    onDate: reservation.onDate,
+    startsAt: reservation.startsAt.toISOString(),
+    timeText: local.time,
+    dateText,
+    restaurantName: ctx.restaurantName,
+    restaurantPhone: ctx.restaurantPhone ?? '',
+    // Solo se avisa al restaurante de lo que NO hizo su propio personal: lo anotado por teléfono o cancelado desde el CRM ya lo sabe.
+    staffNoticeEmail: noticeStaff ? (ctx.notifyEmail ?? '') : '',
+    tableNames: ctx.tableNames.join(', '),
+    manageUrl: ctx.manageUrl ?? '',
+  };
+}
+
+export function reservationCreatedEvent(reservation: Reservation, ctx: ReservationNoticeContext): DomainEvent {
+  return domainEvent({
+    type: 'restaurant.reservation.created',
+    aggregateType: 'reservation',
+    aggregateId: reservation.id,
+    organizationId: reservation.organizationId,
+    payload: noticePayload(reservation, ctx, reservation.source === 'online'),
+  });
+}
+
+export function reservationCancelledEvent(reservation: Reservation, ctx: ReservationNoticeContext): DomainEvent {
+  return domainEvent({
+    type: 'restaurant.reservation.cancelled',
+    aggregateType: 'reservation',
+    aggregateId: reservation.id,
+    organizationId: reservation.organizationId,
+    payload: {
+      ...noticePayload(reservation, ctx, reservation.cancelledBy === 'guest'),
+      cancelledBy: reservation.cancelledBy,
+      cancelReason: reservation.cancelReason ?? '',
+    },
+  });
+}
+
+export function reservationStatusChangedEvent(reservation: Reservation, previous: ReservationStatus): DomainEvent {
+  return domainEvent({
+    type: 'restaurant.reservation.status_changed',
+    aggregateType: 'reservation',
+    aggregateId: reservation.id,
+    organizationId: reservation.organizationId,
+    payload: {
+      reservationId: reservation.id,
+      establishmentId: reservation.establishmentId,
+      code: reservation.code,
+      previous,
+      status: reservation.status,
     },
   });
 }

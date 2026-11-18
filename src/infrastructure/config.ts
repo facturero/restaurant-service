@@ -17,6 +17,11 @@ const schema = z.object({
   // inicializarlo. Si falta (desarrollo local), la comprobación se omite con
   // una advertencia en el log y el alta sigue adelante.
   ORG_SERVICE_URL: z.string().optional(),
+  // Las rutas públicas de reserva no llevan sesión: el servicio pregunta él mismo al catálogo si la organización tiene el módulo
+  // `restaurant.reservations`. Sin URL (desarrollo local) se da por activo, con una advertencia en el log.
+  PLUGIN_CATALOG_SERVICE_URL: z.string().optional(),
+  // Dónde vive el sitio de reservas del cliente: de ahí salen los enlaces de los correos (`<URL>/r/<token>`).
+  PUBLIC_RESERVATIONS_URL: z.string().url().default('https://reservas.noahsolution.com'),
 });
 
 const parsed = schema.safeParse(process.env);
@@ -43,6 +48,8 @@ export interface AppConfig {
   CORS_ORIGIN: string;
   INTERNAL_USER_ID: string;
   ORG_SERVICE_URL: string | undefined;
+  PLUGIN_CATALOG_SERVICE_URL: string | undefined;
+  PUBLIC_RESERVATIONS_URL: string;
 }
 
 export const config: AppConfig = {
@@ -57,4 +64,6 @@ export const config: AppConfig = {
   CORS_ORIGIN: env.CORS_ORIGIN,
   INTERNAL_USER_ID: env.INTERNAL_USER_ID,
   ORG_SERVICE_URL: env.ORG_SERVICE_URL,
+  PLUGIN_CATALOG_SERVICE_URL: env.PLUGIN_CATALOG_SERVICE_URL,
+  PUBLIC_RESERVATIONS_URL: env.PUBLIC_RESERVATIONS_URL.replace(/\/+$/, ''),
 };

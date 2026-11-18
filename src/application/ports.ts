@@ -24,3 +24,19 @@ export type EstablishmentCheckResult = 'exists' | 'missing' | 'unchecked';
 export interface EstablishmentChecker {
   check(organizationId: string, establishmentId: string): Promise<EstablishmentCheckResult>;
 }
+
+/**
+ * ¿La organización tiene activo un módulo de pago? El gateway ya lo comprueba en las rutas
+ * del CRM, pero las rutas PÚBLICAS de reserva no llevan sesión (no hay organización en el
+ * token): el servicio la resuelve por el enlace del restaurante y tiene que preguntar él.
+ */
+export interface PluginGate {
+  isActive(organizationId: string, pluginCode: string): Promise<boolean>;
+}
+
+/** Enlaces que viajan en los correos. Los resuelve la configuración (dónde vive el sitio de reservas). */
+export interface ReservationLinks {
+  manageUrl(token: string): string;
+}
+
+export type Clock = () => Date;

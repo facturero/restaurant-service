@@ -4,6 +4,7 @@ import { logger } from 'hono/logger';
 import { httpInstrumentationMiddleware } from '@hono/otel';
 import { type AppDependencies, healthRoutes, restaurantRoutes } from './routes.js';
 import { contextMiddleware, errorHandler } from './middlewares.js';
+import { publicReservationRoutes } from './reservation-routes.js';
 
 export function createApp(deps: AppDependencies): Hono {
   const app = new Hono();
@@ -28,6 +29,8 @@ export function createApp(deps: AppDependencies): Hono {
 
   app.route('/', healthRoutes());
   app.route('/', restaurantRoutes(deps));
+  // Sin sesión: la organización sale del enlace del restaurante o del token de la reserva (ver reservation-routes.ts).
+  app.route('/', publicReservationRoutes(deps.useCases));
 
   app.onError(errorHandler);
   app.notFound((c) => {

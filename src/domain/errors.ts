@@ -136,3 +136,73 @@ export class ScheduleExceptionNotFoundError extends AppError {
   readonly httpStatus = 404;
   constructor(message = 'Excepción de horario no encontrada.') { super(message); }
 }
+
+// ── Reservas (entregable 2) ─────────────────────────────────────────────────
+
+/** Nunca se distingue «no existe» de «no está abierto al público» en las rutas públicas: no se filtra qué locales existen. */
+export class RestaurantNotFoundError extends AppError {
+  readonly code = 'RESTAURANT_NOT_FOUND';
+  readonly httpStatus = 404;
+  constructor(message = 'Restaurante no encontrado.') { super(message); }
+}
+
+export class ReservationSettingsNotFoundError extends AppError {
+  readonly code = 'RESERVATION_SETTINGS_NOT_FOUND';
+  readonly httpStatus = 404;
+  constructor(message = 'Las reservas de este local aún no están configuradas.') { super(message); }
+}
+
+export class ReservationNotFoundError extends AppError {
+  readonly code = 'RESERVATION_NOT_FOUND';
+  readonly httpStatus = 404;
+  constructor(message = 'Reserva no encontrada.') { super(message); }
+}
+
+export class SlugTakenError extends AppError {
+  readonly code = 'SLUG_TAKEN';
+  readonly httpStatus = 409;
+  constructor(message = 'Ese nombre de enlace ya lo usa otro restaurante. Elige otro.') { super(message); }
+}
+
+export class ReservationsNotAvailableError extends AppError {
+  readonly code = 'RESERVATIONS_NOT_AVAILABLE';
+  readonly httpStatus = 403;
+  constructor(message = 'Este restaurante no está recibiendo reservas en línea.') { super(message); }
+}
+
+export class PartySizeError extends AppError {
+  readonly code = 'PARTY_SIZE_NOT_ALLOWED';
+  readonly httpStatus = 422;
+  constructor(message: string) { super(message, [{ field: 'partySize', message }]); }
+}
+
+export class SlotNotOfferedError extends AppError {
+  readonly code = 'SLOT_NOT_OFFERED';
+  readonly httpStatus = 422;
+  constructor(message = 'Esa hora no está disponible para reservar.') { super(message, [{ field: 'time', message }]); }
+}
+
+/** El hueco se llenó entre que el cliente lo vio y confirmó (o dos personas pidieron la misma mesa a la vez). */
+export class SlotTakenError extends AppError {
+  readonly code = 'SLOT_TAKEN';
+  readonly httpStatus = 409;
+  constructor(message = 'Justo se ocupó esa hora. Elige otra, por favor.') { super(message); }
+}
+
+export class TooManyReservationsError extends AppError {
+  readonly code = 'TOO_MANY_RESERVATIONS';
+  readonly httpStatus = 429;
+  constructor(message = 'Ya tienes varias reservas activas en este restaurante. Cancela alguna o llámalos.') { super(message); }
+}
+
+export class InvalidReservationTransitionError extends AppError {
+  readonly code = 'INVALID_RESERVATION_TRANSITION';
+  readonly httpStatus = 409;
+  constructor(message = 'Esa reserva ya no admite ese cambio.') { super(message); }
+}
+
+export class TablesUnavailableError extends AppError {
+  readonly code = 'TABLES_UNAVAILABLE';
+  readonly httpStatus = 409;
+  constructor(message = 'Alguna de las mesas elegidas ya está ocupada a esa hora.') { super(message); }
+}

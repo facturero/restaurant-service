@@ -45,6 +45,7 @@ import {
   validateJson,
 } from './validators.js';
 import { type ContextVariables, requireOrganization, requirePermission } from './middlewares.js';
+import { reservationRoutes, type ReservationUseCases } from './reservation-routes.js';
 
 type Vars = { Variables: ContextVariables };
 
@@ -67,7 +68,7 @@ export interface AppDependencies {
     addScheduleException: AddScheduleExceptionUseCase;
     removeScheduleException: RemoveScheduleExceptionUseCase;
     previewSlots: PreviewSlotsUseCase;
-  };
+  } & ReservationUseCases;
   corsOrigin: string;
 }
 
@@ -205,6 +206,9 @@ export function restaurantRoutes(deps: AppDependencies): Hono<Vars> {
     requirePermission('restaurant:manage'),
     removeScheduleExceptionController(useCases.removeScheduleException),
   );
+
+  // ── Reservas (entregable 2): ajustes, lista del día y gestión del personal ──
+  r.route('/', reservationRoutes(useCases));
 
   return r;
 }

@@ -95,6 +95,13 @@ spec:
               value: "https://crm.noahsolution.com"
             - name: ORG_SERVICE_URL
               value: "http://organization-service:3002"
+            # Las rutas públicas de reserva no llevan sesión: el servicio le pregunta al catálogo si la organización tiene
+            # contratado `restaurant.reservations` (el gateway no puede hacerlo sin token).
+            - name: PLUGIN_CATALOG_SERVICE_URL
+              value: "http://plugin-catalog-service:3011"
+            # Sitio de reservas del cliente: de aquí salen los enlaces «ver o cancelar mi reserva» de los correos.
+            - name: PUBLIC_RESERVATIONS_URL
+              value: "https://reservas.noahsolution.com"
             - name: INTERNAL_USER_ID
               value: "00000000-0000-0000-0000-000000000000"
             - name: OTEL_SERVICE_NAME

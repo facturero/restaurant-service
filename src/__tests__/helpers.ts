@@ -3,12 +3,17 @@ import type {
   DomainEvent,
   FloorRepository,
   OutboxRepository,
+  ReservationRepository,
+  ReservationSettingsRepository,
   ScheduleRepository,
   TableListFilters,
   UnitOfWork,
   ZoneRepository,
 } from '../domain/repositories.js';
 import type { WriteUnitOfWork } from '../application/ports.js';
+import { Reservation, ReservationSettings } from '../domain/reservation.js';
+import type { TableBooking } from '../domain/availability.js';
+import { ACTIVE_STATUSES } from '../domain/reservation.js';
 import {
   DiningTable,
   EstablishmentSchedule,
@@ -31,6 +36,26 @@ import {
   SaveScheduleUseCase,
 } from '../application/use-cases/schedule-use-cases.js';
 import { PreviewSlotsUseCase } from '../application/use-cases/preview-slots.js';
+import { GetReservationSettingsUseCase, SaveReservationSettingsUseCase } from '../application/use-cases/reservation-settings-use-cases.js';
+import {
+  GetPublicAvailabilityUseCase,
+  GetPublicRestaurantUseCase,
+  GetStaffAvailabilityUseCase,
+} from '../application/use-cases/availability-use-cases.js';
+import {
+  CreatePublicReservationUseCase,
+  CreateStaffReservationUseCase,
+  ReservationBooker,
+} from '../application/use-cases/create-reservation.js';
+import {
+  CancelReservationByTokenUseCase,
+  CancelReservationUseCase,
+  ChangeReservationStatusUseCase,
+  GetReservationByTokenUseCase,
+  GetReservationUseCase,
+  ListReservationsUseCase,
+} from '../application/use-cases/reservation-management.js';
+import { localToUtc } from '../domain/availability.js';
 import { createApp } from '../interface/http/app.js';
 import type { AppDependencies } from '../interface/http/routes.js';
 
@@ -48,6 +73,13 @@ function cloneTable(t: DiningTable): DiningTable {
 function cloneSchedule(s: EstablishmentSchedule): EstablishmentSchedule {
   return EstablishmentSchedule.fromPersistence({ ...s.toPersistence() });
 }
+function cloneSettings(s: ReservationSettings): ReservationSettings {
+  return ReservationSettings.fromPersistence({ ...s.toPersistence() });
+}
+function cloneReservation(r: Reservation): Reservation {
+  return Reservation.fromPersistence({ ...r.toPersistence() });
+}
+interface TableRow { reservationId: string; tableId: string; organizationId: string; from: number; until: number; active: boolean }
 function cloneMap<T>(src: Map<string, T>, clone: (v: T) => T): Map<string, T> {
   const out = new Map<string, T>();
   for (const [k, v] of src) out.set(k, clone(v));
@@ -61,6 +93,9 @@ interface Snapshot {
   schedules: Map<string, EstablishmentSchedule>;
   shifts: Map<string, ScheduleShift>;
   exceptions: Map<string, ScheduleException>;
+  settings: Map<string, ReservationSettings>;
+  reservations: Map<string, Reservation>;
+  rows: TableRow[];
   outboxLength: number;
 }
 
@@ -74,6 +109,9 @@ export class InMemoryUnitOfWork implements WriteUnitOfWork {
   private scheduleMap = new Map<string, EstablishmentSchedule>();
   private shiftMap = new Map<string, ScheduleShift>();
   private exceptionMap = new Map<string, ScheduleException>();
+  private settingsMap = new Map<string, ReservationSettings>();
+  private reservationMap = new Map<string, Reservation>();
+  private tableRows: TableRow[] = [];
   private snapshotStore: Snapshot | null = null;
 
   readonly outboxEvents: DomainEvent[] = [];
@@ -86,6 +124,9 @@ export class InMemoryUnitOfWork implements WriteUnitOfWork {
       schedules: cloneMap(this.scheduleMap, cloneSchedule),
       shifts: new Map(this.shiftMap),
       exceptions: new Map(this.exceptionMap),
+      settings: cloneMap(this.settingsMap, cloneSettings),
+      reservations: cloneMap(this.reservationMap, cloneReservation),
+      rows: this.tableRows.map((r) => ({ ...r })),
       outboxLength: this.outboxEvents.length,
     };
   }
@@ -102,6 +143,9 @@ export class InMemoryUnitOfWork implements WriteUnitOfWork {
     this.scheduleMap = this.snapshotStore.schedules;
     this.shiftMap = this.snapshotStore.shifts;
     this.exceptionMap = this.snapshotStore.exceptions;
+    this.settingsMap = this.snapshotStore.settings;
+    this.reservationMap = this.snapshotStore.reservations;
+    this.tableRows = this.snapshotStore.rows;
     this.outboxEvents.length = this.snapshotStore.outboxLength;
     this.snapshotStore = null;
   }
@@ -221,6 +265,79 @@ export class InMemoryUnitOfWork implements WriteUnitOfWork {
     },
   };
 
+  readonly reservationSettings: ReservationSettingsRepository = {
+    findByEstablishment: async (orgId, estId) =>
+      [...this.settingsMap.values()].find((s) => s.organizationId === orgId && s.establishmentId === estId) ?? null,
+    findBySlug: async (slug) => [...this.settingsMap.values()].find((s) => s.publicSlug === slug) ?? null,
+    slugTaken: async (slug, excludeId) =>
+      [...this.settingsMap.values()].some((s) => s.publicSlug === slug && s.id !== excludeId),
+    save: async (settings) => { this.settingsMap.set(settings.id, settings); },
+  };
+
+  readonly reservations: ReservationRepository = {
+    save: async (reservation) => {
+      // Simula los índices únicos de MySQL: el código y el hash del token no se repiten.
+      for (const other of this.reservationMap.values()) {
+        if (other.id === reservation.id) continue;
+        if (other.code === reservation.code) throw new Error('UNIQUE reservations.code');
+        if (other.cancelTokenHash === reservation.cancelTokenHash) throw new Error('UNIQUE reservations.cancel_token_hash');
+      }
+      this.reservationMap.set(reservation.id, reservation);
+    },
+    findById: async (orgId, id) => {
+      const r = this.reservationMap.get(id);
+      return r && r.organizationId === orgId ? r : null;
+    },
+    findByTokenHash: async (hash) => [...this.reservationMap.values()].find((r) => r.cancelTokenHash === hash) ?? null,
+    listByRange: async (orgId, estId, from, to, filters) =>
+      [...this.reservationMap.values()]
+        .filter((r) => r.organizationId === orgId && r.establishmentId === estId)
+        .filter((r) => r.startsAt.getTime() >= from.getTime() && r.startsAt.getTime() < to.getTime())
+        .filter((r) => (filters?.statuses?.length ? filters.statuses.includes(r.status) : true))
+        .sort((a, b) => a.startsAt.getTime() - b.startsAt.getTime()),
+    tableIdsFor: async (orgId, ids) => {
+      const out = new Map<string, string[]>();
+      for (const row of this.tableRows) {
+        if (row.organizationId !== orgId || !ids.includes(row.reservationId)) continue;
+        out.set(row.reservationId, [...(out.get(row.reservationId) ?? []), row.tableId].sort());
+      }
+      return out;
+    },
+    assignTables: async (reservation, tableIds) => {
+      if (!this.reservationMap.has(reservation.id)) throw new Error('FK reservation_tables.reservation_id');
+      for (const tableId of tableIds) {
+        if (!this.tableMap.has(tableId)) throw new Error('FK reservation_tables.table_id');
+        this.tableRows.push({
+          reservationId: reservation.id,
+          tableId,
+          organizationId: reservation.organizationId,
+          from: reservation.startsAt.getTime(),
+          until: reservation.blockedUntil.getTime(),
+          active: true,
+        });
+      }
+    },
+    releaseTables: async (reservationId) => {
+      for (const row of this.tableRows) if (row.reservationId === reservationId) row.active = false;
+    },
+    // Las pruebas en memoria son secuenciales: no hay carrera que serializar. La carrera real se prueba contra MySQL.
+    lockTables: async () => {},
+    activeBookings: async (orgId, tableIds, from, until): Promise<TableBooking[]> =>
+      this.tableRows
+        .filter((r) => r.organizationId === orgId && r.active && tableIds.includes(r.tableId))
+        .filter((r) => r.from < until.getTime() && r.until > from.getTime())
+        .map((r) => ({ tableId: r.tableId, from: r.from, until: r.until })),
+    countUpcomingByGuest: async (orgId, estId, guest, now) =>
+      [...this.reservationMap.values()].filter(
+        (r) =>
+          r.organizationId === orgId &&
+          r.establishmentId === estId &&
+          ACTIVE_STATUSES.includes(r.status) &&
+          r.startsAt.getTime() > now.getTime() &&
+          (r.guestPhone === guest.phone || (guest.email != null && r.guestEmail === guest.email)),
+      ).length,
+  };
+
   readonly outbox: OutboxRepository = {
     add: async (event) => { this.outboxEvents.push(event); },
   };
@@ -249,7 +366,13 @@ export const UUID = {
   ZONE: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
   SCHEDULE: 'dddddddd-dddd-dddd-dddd-dddddddddddd',
   USER: 'ffffffff-ffff-ffff-ffff-ffffffffffff',
+  TABLE3: 'acacacac-acac-4cac-8cac-acacacacacac',
 };
+
+/** «Ahora» de las pruebas de reservas: jueves 15 de octubre de 2026, 12:00 en Guayaquil. */
+export const NOW = localToUtc('2026-10-15', '12:00', 'America/Guayaquil');
+/** Sábado 17 de octubre de 2026 (dos días después de NOW). */
+export const SATURDAY = '2026-10-17';
 
 export function seedFloor(
   uow: InMemoryUnitOfWork,
@@ -319,7 +442,7 @@ export function fixedEstablishmentChecker(result: 'exists' | 'missing' | 'unchec
 }
 
 export interface TestRequestOptions {
-  /** Permisos del header `X-Permissions`; por defecto lectura + gestión. */
+  /** Permisos del header `X-Permissions`; por defecto todo: mapa y reservas, lectura y gestión. */
   permissions?: string;
   /** `null` omite el header de organización (para probar el 401 de contexto). */
   organizationId?: string | null;
@@ -332,10 +455,23 @@ export interface TestRequestOptions {
  * middlewares reales (permisos, contexto, errores) se ejercitan igual que en
  * producción; solo cambia de dónde salen los datos.
  */
-export function buildTestApp(params: { establishment?: 'exists' | 'missing' | 'unchecked' } = {}) {
+export function buildTestApp(
+  params: { establishment?: 'exists' | 'missing' | 'unchecked'; now?: Date; pluginActive?: boolean } = {},
+) {
   const uow = new InMemoryUnitOfWork();
   const gateway = inMemoryGateway(uow);
-  const repos = { floors: uow.floors, zones: uow.zones, tables: uow.tables, schedules: uow.schedules };
+  const repos = {
+    floors: uow.floors,
+    zones: uow.zones,
+    tables: uow.tables,
+    schedules: uow.schedules,
+    reservationSettings: uow.reservationSettings,
+    reservations: uow.reservations,
+  };
+  const clockState = { now: params.now ?? NOW };
+  const clock = () => clockState.now;
+  const plugins = { isActive: async () => params.pluginActive ?? true };
+  const booker = new ReservationBooker(gateway, { manageUrl: (token) => `https://reservas.test/r/${token}` }, clock);
 
   const deps: AppDependencies = {
     useCases: {
@@ -356,6 +492,19 @@ export function buildTestApp(params: { establishment?: 'exists' | 'missing' | 'u
       addScheduleException: new AddScheduleExceptionUseCase(gateway),
       removeScheduleException: new RemoveScheduleExceptionUseCase(gateway),
       previewSlots: new PreviewSlotsUseCase(repos),
+      getReservationSettings: new GetReservationSettingsUseCase(repos),
+      saveReservationSettings: new SaveReservationSettingsUseCase(gateway, fixedEstablishmentChecker(params.establishment ?? 'exists')),
+      staffAvailability: new GetStaffAvailabilityUseCase(repos, clock),
+      listReservations: new ListReservationsUseCase(repos),
+      createStaffReservation: new CreateStaffReservationUseCase(repos, booker),
+      getReservation: new GetReservationUseCase(repos),
+      changeReservationStatus: new ChangeReservationStatusUseCase(gateway, repos),
+      cancelReservation: new CancelReservationUseCase(gateway, repos, clock),
+      publicRestaurant: new GetPublicRestaurantUseCase(repos, plugins),
+      publicAvailability: new GetPublicAvailabilityUseCase(repos, plugins, clock),
+      createPublicReservation: new CreatePublicReservationUseCase(repos, plugins, booker),
+      getReservationByToken: new GetReservationByTokenUseCase(repos, clock),
+      cancelReservationByToken: new CancelReservationByTokenUseCase(gateway, repos, clock),
     },
     corsOrigin: '*',
   };
@@ -364,7 +513,7 @@ export function buildTestApp(params: { establishment?: 'exists' | 'missing' | 'u
   function request(method: string, path: string, opts: TestRequestOptions = {}): Promise<Response> {
     const headers: Record<string, string> = {
       'X-User-Id': opts.userId ?? UUID.USER,
-      'X-Permissions': opts.permissions ?? 'restaurant:read,restaurant:manage',
+      'X-Permissions': opts.permissions ?? 'restaurant:read,restaurant:manage,reservation:read,reservation:manage',
     };
     if (opts.organizationId !== null) headers['X-Organization-Id'] = opts.organizationId ?? UUID.ORG;
     if (opts.body !== undefined) headers['Content-Type'] = 'application/json';
@@ -375,5 +524,36 @@ export function buildTestApp(params: { establishment?: 'exists' | 'missing' | 'u
     });
   }
 
-  return { uow, app, request };
+  return { uow, app, request, clockState, gateway, repos, booker, plugins };
+}
+
+/**
+ * Un local listo para recibir reservas el sábado 17: planta, horario por defecto, cenas de 19:00 a 21:00 (inicios 19:00 a 20:30),
+ * tres mesas (2, 4 y 4 personas) y la página pública encendida con el enlace `la-esquina`.
+ */
+export async function seedBookableRestaurant(
+  uow: InMemoryUnitOfWork,
+  opts: { organizationId?: string; establishmentId?: string; slug?: string; enabled?: boolean; maxTables?: number } = {},
+) {
+  const organizationId = opts.organizationId ?? UUID.ORG;
+  const establishmentId = opts.establishmentId ?? UUID.ESTABLISHMENT;
+  seedFloor(uow, { organizationId, establishmentId });
+  const schedule = seedSchedule(uow, { organizationId, establishmentId });
+  await uow.schedules.replaceShifts(organizationId, schedule.id, [
+    ScheduleShift.create({ organizationId, scheduleId: schedule.id, weekday: 6, opensAt: '19:00', closesAt: '21:00', label: 'Cena' }),
+  ]);
+  seedTable(uow, { organizationId, id: UUID.TABLE, name: 'Mesa 1', capacityMin: 1, capacityMax: 2 });
+  seedTable(uow, { organizationId, id: UUID.TABLE2, name: 'Mesa 2', capacityMin: 1, capacityMax: 4 });
+  seedTable(uow, { organizationId, id: UUID.TABLE3, name: 'Mesa 3', capacityMin: 1, capacityMax: 4 });
+  const settings = ReservationSettings.create({ organizationId, establishmentId });
+  settings.update({
+    enabled: opts.enabled ?? true,
+    publicSlug: opts.slug ?? 'la-esquina',
+    displayName: 'La Esquina',
+    contactPhone: '+593 99 123 4567',
+    notifyEmail: 'dueno@laesquina.test',
+    ...(opts.maxTables ? { maxTablesPerReservation: opts.maxTables } : {}),
+  });
+  await uow.reservationSettings.save(settings);
+  return { settings, schedule };
 }
