@@ -46,7 +46,7 @@ export const createTableSchema = z
     name: z.string().min(1, 'El nombre es obligatorio.').max(60),
     capacityMin,
     capacityMax,
-    zoneId: z.string().uuid('La zona no es válida.').nullable().optional(),
+    zoneId: z.string().guid('La zona no es válida.').nullable().optional(),
     xCm: position.optional(),
     yCm: position.optional(),
     widthCm: tableDimension.optional(),
@@ -65,7 +65,7 @@ export const updateTableSchema = z
     name: z.string().min(1, 'El nombre es obligatorio.').max(60),
     capacityMin,
     capacityMax,
-    zoneId: z.string().uuid('La zona no es válida.').nullable(),
+    zoneId: z.string().guid('La zona no es válida.').nullable(),
     xCm: position,
     yCm: position,
     widthCm: tableDimension,
@@ -92,7 +92,7 @@ export const bulkCreateTablesSchema = z
 
 const planZone = z
   .object({
-    id: z.string().uuid('El id de la zona no es válido.'),
+    id: z.string().guid('El id de la zona no es válido.'),
     name: z.string().min(1, 'El nombre de la zona es obligatorio.').max(60),
     color: COLOR.optional(),
   })
@@ -100,11 +100,11 @@ const planZone = z
 
 const planTable = z
   .object({
-    id: z.string().uuid('El id de la mesa no es válido.'),
+    id: z.string().guid('El id de la mesa no es válido.'),
     name: z.string().min(1, 'El nombre de la mesa es obligatorio.').max(60),
     capacityMin,
     capacityMax,
-    zoneId: z.string().uuid('La zona no es válida.').nullable().optional(),
+    zoneId: z.string().guid('La zona no es válida.').nullable().optional(),
     xCm: position.optional(),
     yCm: position.optional(),
     widthCm: tableDimension.optional(),

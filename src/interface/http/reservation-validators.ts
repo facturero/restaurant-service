@@ -48,7 +48,7 @@ export const staffCreateReservationSchema = z
     ...guest,
     // Por teléfono no siempre hay correo: sin él la reserva queda igual, solo que sin enlace ni aviso al cliente.
     guestEmail: z.string().trim().max(160).nullable().optional(),
-    tableIds: z.array(z.string().uuid('La mesa no es válida.')).max(10).optional(),
+    tableIds: z.array(z.string().guid('La mesa no es válida.')).max(10).optional(),
   })
   .strict();
 
